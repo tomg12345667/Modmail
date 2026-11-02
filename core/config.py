@@ -137,6 +137,7 @@ class ConfigManager:
         "thread_min_characters_footer": "Minimum {min_characters} characters required.",
         # --- SNOOZE FEATURE CONFIG ---
         "snooze_default_duration": 604800,  # in seconds, default 7 days
+        "command_cooldown": 0,  # seconds; cooldown on title/adduser/removeuser commands (0 = off)
         "snooze_title": "Thread Snoozed",
         "snooze_text": "This thread has been snoozed. The channel will be restored when the user replies or a moderator unsnoozes it.",
         "unsnooze_text": "This thread has been unsnoozed and restored.",
@@ -243,7 +244,7 @@ class ConfigManager:
         "log_expiration",
     }
 
-    duration_seconds = {"snooze_default_duration"}
+    duration_seconds = {"snooze_default_duration", "command_cooldown"}
 
     booleans = {
         "use_user_id_channel_name",
@@ -511,9 +512,12 @@ class ConfigManager:
         elif key in self.duration_seconds:
             if isinstance(item, int):
                 return self.__setitem__(key, item)
+            if str(item).strip().isdigit():
+                return self.__setitem__(key, int(str(item).strip()))
             try:
+                now = discord.utils.utcnow()
                 converter = UserFriendlyTime()
-                time = await converter.convert(None, str(item), now=discord.utils.utcnow())
+                time = await converter.convert(None, str(item), now=now)
                 if time.arg:
                     raise ValueError
             except BadArgument as exc:
@@ -523,8 +527,9 @@ class ConfigManager:
                 raise InvalidConfigError(
                     "Unrecognized time, please use a duration like '5 days' or '2 hours'."
                 )
-            now = discord.utils.utcnow()
-            duration_seconds = int((time.dt - now).total_seconds())
+            # Some parsers drop microseconds; compare on the same footing.
+            base = now.replace(microsecond=0) if time.dt.microsecond == 0 else now
+            duration_seconds = int(round((time.dt - base).total_seconds()))
             return self.__setitem__(key, duration_seconds)
 
         elif key in self.enums:
