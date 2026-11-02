@@ -34,6 +34,7 @@ from core.models import (
 )
 from core.utils import DummyParam
 from core.paginator import EmbedPaginatorSession, MessagePaginatorSession
+from core.guildprofile import KEYS as GUILD_PROFILE_KEYS, apply_guild_profile
 
 
 logger = getLogger(__name__)
@@ -815,6 +816,22 @@ class Utility(commands.Cog):
 
         if key in keys:
             try:
+                if key in GUILD_PROFILE_KEYS:
+                    previous = self.bot.config.get(key, convert=False)
+                    await self.bot.config.set(key, value)
+                    try:
+                        async with ctx.typing():
+                            status = await apply_guild_profile(self.bot, key)
+                    except Exception as e:
+                        # Don't keep a setting that Discord rejected.
+                        if previous is None:
+                            self.bot.config.remove(key)
+                        else:
+                            await self.bot.config.set(key, previous)
+                        raise InvalidConfigError(str(e))
+                    await self.bot.config.update()
+                    embed = discord.Embed(title="Success", color=self.bot.main_color, description=status)
+                    return await ctx.send(embed=embed)
                 await self.bot.config.set(key, value)
                 await self.bot.config.update()
                 embed = discord.Embed(
@@ -873,6 +890,11 @@ class Utility(commands.Cog):
                 color=self.bot.main_color,
                 description=f"`{key}` had been reset to default.",
             )
+            if key in GUILD_PROFILE_KEYS:
+                try:
+                    embed.description = await apply_guild_profile(self.bot, key)
+                except Exception as e:
+                    embed.add_field(name="Discord didn't accept the reset", value=str(e)[:1024])
         else:
             embed = discord.Embed(
                 title="Error",

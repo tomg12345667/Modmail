@@ -137,6 +137,8 @@ class ConfigManager:
         "thread_min_characters_footer": "Minimum {min_characters} characters required.",
         # --- SNOOZE FEATURE CONFIG ---
         "snooze_default_duration": 604800,  # in seconds, default 7 days
+        "bot_display_name_server": None,  # bot nickname in this server only
+        "bot_profile_picture_server": None,  # bot avatar in this server only (URL or file path)
         "max_thread_users": 10,  # max people in one (group) thread, up to 40
         "command_cooldown": 0,  # seconds; cooldown on title/adduser/removeuser commands (0 = off)
         "snooze_title": "Thread Snoozed",
