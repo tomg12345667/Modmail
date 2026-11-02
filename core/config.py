@@ -137,6 +137,7 @@ class ConfigManager:
         "thread_min_characters_footer": "Minimum {min_characters} characters required.",
         # --- SNOOZE FEATURE CONFIG ---
         "snooze_default_duration": 604800,  # in seconds, default 7 days
+        "max_thread_users": 10,  # max people in one (group) thread, up to 40
         "command_cooldown": 0,  # seconds; cooldown on title/adduser/removeuser commands (0 = off)
         "snooze_title": "Thread Snoozed",
         "snooze_text": "This thread has been snoozed. The channel will be restored when the user replies or a moderator unsnoozes it.",
@@ -245,6 +246,8 @@ class ConfigManager:
     }
 
     duration_seconds = {"snooze_default_duration", "command_cooldown"}
+
+    integers = {"max_thread_users"}
 
     booleans = {
         "use_user_id_channel_name",
@@ -417,6 +420,12 @@ class ConfigManager:
                 logger.warning("Invalid %s %s.", key, value)
                 value = self.remove(key)
 
+        elif key in self.integers:
+            try:
+                value = int(value)
+            except (ValueError, TypeError):
+                value = self.remove(key)
+
         elif key in self.duration_seconds:
             if not isinstance(value, int):
                 try:
@@ -508,6 +517,12 @@ class ConfigManager:
                 return self.__setitem__(key, strtobool(item))
             except ValueError:
                 raise InvalidConfigError("Must be a yes/no value.")
+
+        elif key in self.integers:
+            try:
+                return self.__setitem__(key, int(str(item).strip()))
+            except ValueError:
+                raise InvalidConfigError("Please provide a whole number.")
 
         elif key in self.duration_seconds:
             if isinstance(item, int):

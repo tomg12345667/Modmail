@@ -28,6 +28,18 @@ from core.utils import *
 logger = getLogger(__name__)
 
 
+# Group members are stored in the channel topic (1024 chars), so cap it there.
+MAX_THREAD_USERS_CAP = 40
+
+
+def max_thread_users(bot) -> int:
+    try:
+        n = int(bot.config.get("max_thread_users") or 10)
+    except (TypeError, ValueError):
+        n = 10
+    return max(1, min(n, MAX_THREAD_USERS_CAP))
+
+
 def _thread_command_cooldown(ctx):
     """Cooldown for title/adduser/removeuser, set with `?config set command_cooldown`."""
     try:
@@ -982,10 +994,11 @@ class Modmail(commands.Cog):
             ctx.command.reset_cooldown(ctx)
             return
 
-        if len(users + ctx.thread.recipients) > 5:
+        limit = max_thread_users(self.bot)
+        if len(users + ctx.thread.recipients) > limit:
             em = discord.Embed(
                 title="Error",
-                description="Only 5 users are allowed in a group conversation",
+                description=f"Only {limit} users are allowed in a group conversation",
                 color=self.bot.error_color,
             )
             await ctx.send(embed=em)
@@ -1792,7 +1805,7 @@ class Modmail(commands.Cog):
 
         `category`, if specified, may be a category ID, mention, or name.
         `users` may be a user ID, mention, or name. If multiple users are specified, a group thread will start.
-        A maximum of 5 users are allowed.
+        The maximum number of users is set by `max_thread_users` (default 10).
         `options` can be `silent` or `silently`.
         """
         silent = any(x in users for x in ("silent", "silently"))
@@ -1866,8 +1879,8 @@ class Modmail(commands.Cog):
             # Don't try to create a new thread - we just unsnoozed existing ones
             return
 
-        if len(users) > 5:
-            errors.append("Group conversations only support 5 users.")
+        if len(users) > max_thread_users(self.bot):
+            errors.append(f"Group conversations only support {max_thread_users(self.bot)} users.")
             users = []
 
         if errors or not users:
