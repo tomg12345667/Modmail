@@ -480,7 +480,7 @@ class Thread:
                 key = self.snooze_data.get("log_key") or self.log_key
                 log_url = (
                     f"{self.bot.config['log_url'].strip('/')}{'/' + prefix if prefix else ''}/{key}"
-                    if key
+                    if key and self.bot.log_links_enabled
                     else None
                 )
                 log_count = None
@@ -586,7 +586,7 @@ class Thread:
                     prefix = ""
                 log_url = (
                     f"{self.bot.config['log_url'].strip('/')}{'/' + prefix if prefix else ''}/{self.log_key}"
-                    if self.log_key
+                    if self.log_key and self.bot.log_links_enabled
                     else None
                 )
 
@@ -1143,7 +1143,11 @@ class Thread:
             else:
                 _nsfw = ""
 
-            desc = f"[`{_nsfw}{log_data['key']}`]({log_url}): "
+            if self.bot.log_links_enabled:
+                desc = f"[`{_nsfw}{log_data['key']}`]({log_url}): "
+            else:
+                log_url = None
+                desc = f"`{_nsfw}{log_data['key']}`: "
             desc += truncate(sneak_peak, max=75 - 13)
         else:
             desc = "Could not resolve log url."
@@ -1176,7 +1180,14 @@ class Thread:
             if self.bot.config.get("show_log_url_button") and log_url:
                 view = discord.ui.View()
                 view.add_item(discord.ui.Button(label="Log link", url=log_url, style=discord.ButtonStyle.url))
-            tasks.append(self.bot.log_channel.send(embed=embed, view=view))
+            log_kwargs = {"embed": embed}
+            if view is not None:
+                log_kwargs["view"] = view
+            if isinstance(log_data, dict):
+                from core.logtext import log_file
+
+                log_kwargs["file"] = log_file(log_data)
+            tasks.append(self.bot.log_channel.send(**log_kwargs))
 
         # Thread closed message
 
@@ -2165,6 +2176,18 @@ class Thread:
         else:
             mentions = None
 
+        # Icons on private/LAN addresses can't be loaded by Discord, so upload them.
+        from core.localicon import localize_icons
+
+        _icon_file = await localize_icons(self.bot, embed)
+
+        def _icon_kwargs():
+            # A discord.File can only be sent once; give each send a fresh copy.
+            if _icon_file is None:
+                return {}
+            _icon_file.fp.seek(0)
+            return {"file": discord.File(io.BytesIO(_icon_file.fp.read()), filename=_icon_file.filename)}
+
         if plain:
             if from_mod and not isinstance(destination, discord.TextChannel):
                 # Plain to user (DM)
@@ -2188,11 +2211,11 @@ class Thread:
                 # Plain to mods
                 footer_text = embed.footer.text if embed.footer else ""
                 embed.set_footer(text=f"[PLAIN] {footer_text}".strip())
-                msg = await destination.send(mentions, embed=embed)
+                msg = await destination.send(mentions, embed=embed, **_icon_kwargs())
 
         else:
             try:
-                msg = await destination.send(mentions, embed=embed)
+                msg = await destination.send(mentions, embed=embed, **_icon_kwargs())
             except discord.NotFound:
                 if (
                     isinstance(destination, discord.TextChannel)
@@ -2202,7 +2225,7 @@ class Thread:
                     logger.info("Thread channel missing while sending; attempting restore and resend.")
                     await self.restore_from_snooze()
                     destination = self.channel or destination
-                    msg = await destination.send(mentions, embed=embed)
+                    msg = await destination.send(mentions, embed=embed, **_icon_kwargs())
                 else:
                     logger.warning("Channel not found during send.")
                     raise

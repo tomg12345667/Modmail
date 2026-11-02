@@ -34,7 +34,7 @@ except ImportError:
 
 from core import checks
 from core.changelog import Changelog
-from core.clients import ApiClient, MongoDBClient, PluginDatabaseClient
+from core.clients import ApiClient, JSONClient, MongoDBClient, PluginDatabaseClient
 from core.config import ConfigManager
 from core.models import (
     DMDisabled,
@@ -207,12 +207,22 @@ class ModmailBot(commands.Bot):
     @property
     def api(self) -> ApiClient:
         if self._api is None:
-            if self.config["database_type"].lower() == "mongodb":
+            db_type = (self.config["database_type"] or "json").lower()
+            if db_type == "json":
+                self._api = JSONClient(self)
+            elif db_type == "mongodb":
                 self._api = MongoDBClient(self)
             else:
                 logger.critical("Invalid database type.")
                 raise RuntimeError
         return self._api
+
+    @property
+    def log_links_enabled(self) -> bool:
+        """Web log links only exist with MongoDB+logviewer or the built-in viewer."""
+        if (self.config["database_type"] or "json").lower() == "mongodb":
+            return True
+        return bool(self.config["log_viewer_port"])
 
     @property
     def db(self):
@@ -513,6 +523,19 @@ class ModmailBot(commands.Bot):
             return PermissionLevel.INVALID
         return level
 
+    async def _start_log_viewer(self):
+        port = self.config["log_viewer_port"]
+        if not port:
+            return
+        try:
+            from core.logviewer import LogViewer
+
+            if getattr(self, "_log_viewer", None) is None:
+                self._log_viewer = LogViewer(self)
+            await self._log_viewer.start(self.config["log_viewer_host"] or "0.0.0.0", int(port))
+        except Exception:
+            logger.error("Failed to start the built-in log viewer.", exc_info=True)
+
     async def on_connect(self):
         try:
             await self.api.validate_database_connection()
@@ -523,6 +546,7 @@ class ModmailBot(commands.Bot):
         logger.debug("Connected to gateway.")
         await self.config.refresh()
         await self.api.setup_indexes()
+        await self._start_log_viewer()
         await self.load_extensions()
         self._connected.set()
 

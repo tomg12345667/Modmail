@@ -8,8 +8,16 @@ from discord import Member, DMChannel, TextChannel, Message
 from discord.ext import commands
 
 from aiohttp import ClientResponseError, ClientResponse
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.errors import ConfigurationError
+
+try:  # MongoDB support is optional; the JSON backend does not need it.
+    from motor.motor_asyncio import AsyncIOMotorClient
+    from pymongo.errors import ConfigurationError
+except ImportError:  # pragma: no cover
+    AsyncIOMotorClient = None
+
+    class ConfigurationError(Exception):
+        pass
+
 
 from core.models import InvalidConfigError, getLogger
 
@@ -449,6 +457,9 @@ class MongoDBClient(ApiClient):
                 logger.critical("A Mongo URI is necessary for the bot to function.")
                 raise RuntimeError
 
+        if AsyncIOMotorClient is None:
+            logger.critical("motor is not installed; install it or set DATABASE_TYPE=json.")
+            raise RuntimeError
         try:
             db = AsyncIOMotorClient(mongo_uri).modmail_bot
         except ConfigurationError as e:
@@ -778,6 +789,73 @@ class MongoDBClient(ApiClient):
                     "url": user.url,
                 }
             }
+
+
+class JSONClient(MongoDBClient):
+    """
+    Stores everything (logs, config, notes, plugin data) as JSON files on disk.
+
+    It speaks the same query language as the MongoDB client, so every command,
+    cog and plugin keeps working unchanged. Data lives in DATA_DIR
+    (default: ./data), one folder per collection and one file per document.
+    """
+
+    def __init__(self, bot):
+        import os
+
+        from core.jsondb import JSONDatabase
+
+        path = bot.config["data_dir"] or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
+        )
+        db = JSONDatabase(path, logger=logger)
+        logger.info("Using JSON file database at %s.", db.path)
+        ApiClient.__init__(self, bot, db)
+
+    async def setup_indexes(self):
+        logger.debug("JSON database does not need indexes.")
+
+    async def create_log_entry(self, recipient: Member, channel: TextChannel, creator: Member) -> str:
+        url = await super().create_log_entry(recipient, channel, creator)
+        return url if self.bot.log_links_enabled else None
+
+    async def get_full_log(self, key: str) -> Optional[dict]:
+        return await self.logs.find_one({"key": key})
+
+    async def validate_database_connection(self, *, ssl_retry=True):
+        import os
+
+        if not os.access(self.db.path, os.W_OK):
+            logger.critical("The JSON data folder %s is not writable.", self.db.path)
+            raise RuntimeError("JSON data folder is not writable")
+        logger.debug("JSON database folder is ready: %s", self.db.path)
+        logger.line("debug")
+
+    async def search_by_text(self, text: str, limit: Optional[int]):
+        # Mongo's text index only covered these three fields; search the same ones.
+        needle = text.lower()
+
+        def hit(doc):
+            if needle in str(doc.get("key", "")).lower():
+                return True
+            for m in doc.get("messages") or []:
+                if needle in str(m.get("content") or "").lower():
+                    return True
+                if needle in str((m.get("author") or {}).get("name") or "").lower():
+                    return True
+            return False
+
+        docs = await self.logs.find(
+            {"guild_id": str(self.bot.guild_id), "open": False},
+        ).to_list(None)
+        results = []
+        for doc in docs:
+            if hit(doc):
+                doc["messages"] = (doc.get("messages") or [])[:5]
+                results.append(doc)
+                if limit and len(results) >= limit:
+                    break
+        return results
 
 
 class PluginDatabaseClient:

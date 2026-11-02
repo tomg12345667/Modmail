@@ -1,3 +1,4 @@
+import io
 import asyncio
 import re
 from datetime import datetime, timezone, timedelta
@@ -18,6 +19,8 @@ from dateutil import parser
 from core import checks
 from core.models import DMDisabled, PermissionLevel, SimilarCategoryConverter, getLogger
 from core.paginator import EmbedPaginatorSession
+from core.localicon import localize_icons
+from core.logtext import log_file, make_file, render_many, MAX_FILE_BYTES
 from core.thread import Thread
 from core.time import UserFriendlyTime, human_timedelta
 from core.utils import *
@@ -830,9 +833,32 @@ class Modmail(commands.Cog):
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
     async def loglink(self, ctx):
-        """Retrieves the link to the current thread's logs."""
-        log_link = await self.bot.api.get_log_link(ctx.channel.id)
-        await ctx.send(embed=discord.Embed(color=self.bot.main_color, description=log_link))
+        """Retrieves the current thread's log as a .txt transcript (plus a link if a log viewer is set up)."""
+        doc = await self.bot.api.get_log(ctx.channel.id)
+        if not doc:
+            return await ctx.send(
+                embed=discord.Embed(color=self.bot.error_color, description="No log found for this thread.")
+            )
+        desc = f"Transcript for log `{doc['key']}`."
+        if self.bot.log_links_enabled:
+            desc += "\n" + await self.bot.api.get_log_link(ctx.channel.id)
+        await ctx.send(embed=discord.Embed(color=self.bot.main_color, description=desc), file=log_file(doc))
+
+    async def send_log_transcripts(self, ctx, entries, filename):
+        """Send the full transcripts of the given log entries as .txt file(s)."""
+        docs = []
+        for entry in entries:
+            full = await self.bot.api.logs.find_one({"key": entry["key"]})
+            if full:
+                docs.append(full)
+        if not docs:
+            return
+        text = render_many(docs)
+        if len(text.encode("utf-8")) <= MAX_FILE_BYTES:
+            await ctx.send(f"Full transcript of {len(docs)} log(s):", file=make_file(text, filename))
+        else:
+            for i in range(0, len(docs), 10):
+                await ctx.send(files=[log_file(d) for d in docs[i : i + 10]])
 
     def format_log_embeds(self, logs, avatar_url):
         embeds = []
@@ -853,6 +879,8 @@ class Modmail(commands.Cog):
             if entry["recipient"]["discriminator"] != "0":
                 username += "#" + entry["recipient"]["discriminator"]
 
+            if not self.bot.log_links_enabled:
+                log_url = None
             embed = discord.Embed(color=self.bot.main_color, timestamp=created_at)
             embed.set_author(name=f"{title} - {username}", icon_url=avatar_url, url=log_url)
             embed.url = log_url
@@ -872,7 +900,9 @@ class Modmail(commands.Cog):
 
             embed.add_field(name="Preview", value=format_preview(entry["messages"]), inline=False)
 
-            if closer is not None:
+            if log_url is None:
+                embed.add_field(name="Log Key", value=f"`{entry['key']}` (`logs key {entry['key']}` for transcript)")
+            elif closer is not None:
                 # BUG: Currently, logviewer can't display logs without a closer.
                 embed.add_field(name="Link", value=log_url)
             else:
@@ -1163,8 +1193,14 @@ class Modmail(commands.Cog):
                 avatar_url = self.bot.get_guild_icon(guild=ctx.guild, size=128)
             em.set_footer(text=name, icon_url=avatar_url if avatar_url else None)
 
+            icon_file = await localize_icons(self.bot, em)
             for u in users:
-                to_exec.append(u.send(embed=em))
+                if icon_file is not None:
+                    icon_file.fp.seek(0)
+                    f = discord.File(io.BytesIO(icon_file.fp.read()), filename=icon_file.filename)
+                    to_exec.append(u.send(embed=em, file=f))
+                else:
+                    to_exec.append(u.send(embed=em))
 
             description = self.bot.formatter.format(
                 self.bot.config["public_added_to_group_description_anon"],
@@ -1254,8 +1290,14 @@ class Modmail(commands.Cog):
                 avatar_url = self.bot.get_guild_icon(guild=ctx.guild, size=128)
             em.set_footer(text=name, icon_url=avatar_url if avatar_url else None)
 
+            icon_file = await localize_icons(self.bot, em)
             for u in users:
-                to_exec.append(u.send(embed=em))
+                if icon_file is not None:
+                    icon_file.fp.seek(0)
+                    f = discord.File(io.BytesIO(icon_file.fp.read()), filename=icon_file.filename)
+                    to_exec.append(u.send(embed=em, file=f))
+                else:
+                    to_exec.append(u.send(embed=em))
 
             description = self.bot.formatter.format(
                 self.bot.config["public_removed_from_group_description_anon"],
@@ -1315,7 +1357,9 @@ class Modmail(commands.Cog):
             )
             return await ctx.send(embed=embed)
 
-        logs = reversed([log for log in logs if not log["open"]])
+        logs = list(reversed([log for log in logs if not log["open"]]))
+
+        await self.send_log_transcripts(ctx, logs, f"modmail-logs-{user.id}.txt")
 
         embeds = self.format_log_embeds(logs, avatar_url=icon_url)
 
@@ -1362,6 +1406,8 @@ class Modmail(commands.Cog):
                 description=f"Log entry `{key}` not found.",
             )
             return await ctx.send(embed=embed)
+
+        await self.send_log_transcripts(ctx, logs, f"modmail-log-{key}.txt")
 
         embeds = self.format_log_embeds(logs, avatar_url=icon_url)
 

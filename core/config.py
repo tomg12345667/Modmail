@@ -202,7 +202,10 @@ class ConfigManager:
         "log_url": "https://example.com/",
         "log_url_prefix": "/logs",
         "mongo_uri": None,
-        "database_type": "mongodb",
+        "database_type": "json",
+        "data_dir": None,
+        "log_viewer_port": None,
+        "log_viewer_host": "0.0.0.0",
         "connection_uri": None,  # replace mongo uri in the future
         "owners": None,
         "enable_presence_intent": False,
