@@ -129,13 +129,23 @@ class Plugins(commands.Cog):
         else:
             logger.info("Plugins not loaded since ENABLE_PLUGINS=false.")
 
+    # Plugin list comes from this fork so custom plugins (e.g. embed) are included.
+    REGISTRY_URL = "https://raw.githubusercontent.com/tomg12345667/Modmail/master/plugins/registry.json"
+
     async def populate_registry(self):
-        url = "https://raw.githubusercontent.com/modmail-dev/modmail/master/plugins/registry.json"
         try:
-            async with self.bot.session.get(url) as resp:
+            async with self.bot.session.get(self.REGISTRY_URL) as resp:
+                resp.raise_for_status()
                 self.registry = json.loads(await resp.text())
-        except asyncio.TimeoutError:
-            logger.warning("Failed to fetch registry. Loading with empty registry")
+                return
+        except Exception as e:
+            logger.warning("Failed to fetch plugin registry (%s); using the local copy.", e)
+        try:
+            local = Path(__file__).resolve().parent.parent / "plugins" / "registry.json"
+            self.registry = json.loads(local.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to read local plugin registry. Loading with empty registry")
+            self.registry = {}
 
     async def initial_load_plugins(self):
         for plugin_name in list(self.bot.config["plugins"]):
