@@ -126,7 +126,7 @@
         "thumbnail_url": "https://i.imgur.com/A1auJ95.png"
     },
     "embed": {
-        "repository": "tomg12345667/modmail-plugins",
+        "repository": "tomg12345667/Modmail",
         "branch": "master",
         "description": "Build, preview, post and edit embeds with buttons. Save embeds as templates and import/export JSON (Discohook).",
         "bot_version": "4.0.0",
