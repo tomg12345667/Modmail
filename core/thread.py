@@ -39,6 +39,87 @@ from core.utils import (
 
 logger = getLogger(__name__)
 
+# --- Thread-creation menu helpers (submenu navigation) -------------------------
+_MENU_HOME = "__menu_home__"
+
+
+def _thread_menu_select_options(data: dict, is_home: bool):
+    """Build dropdown options for a (sub)menu.
+
+    Each option's value is its position in the list, so choices are matched
+    exactly as configured, whatever punctuation their labels contain.
+    """
+    entries = [o for o in (data or {}).values() if isinstance(o, dict)]
+    entries = entries[: 25 if is_home else 24]  # Discord allows 25 options; submenus keep one for "Main menu"
+    opts = []
+    for i, o in enumerate(entries):
+        desc = o.get("description")
+        opts.append(
+            discord.SelectOption(
+                label=str(o.get("label") or "Option")[:100],
+                description=str(desc)[:100] if desc else None,
+                emoji=o.get("emoji") or None,
+                value=str(i),
+            )
+        )
+    if not is_home:
+        opts.append(
+            discord.SelectOption(
+                label="Main menu", description="Go back to the main menu", emoji="\U0001f3e0", value=_MENU_HOME
+            )
+        )
+    return entries, opts
+
+
+def _thread_menu_find_submenu(submenus: dict, name) -> typing.Optional[dict]:
+    name = str(name or "")
+    if name in submenus:
+        return submenus[name]
+    alt = name.lower().replace(" ", "_")
+    return submenus.get(alt)
+
+
+async def _thread_menu_navigate(select, interaction, home_options: dict, submenus: dict, make_view):
+    """Handle a dropdown choice.
+
+    Opens a submenu (or goes back to the main menu) by swapping the dropdown,
+    and returns None. For a normal choice, returns the chosen option dict.
+    """
+    choice = select.values[0]
+    if choice == _MENU_HOME:
+        target, is_home, path = home_options, True, ()
+    else:
+        try:
+            entry = select.entries[int(choice)]
+        except (ValueError, IndexError):
+            return None
+        if entry.get("type") != "submenu":
+            return entry
+        target = _thread_menu_find_submenu(submenus, entry.get("callback"))
+        if not target:
+            logger.warning(
+                "Thread menu option %r points to submenu %r, which doesn't exist or is empty.",
+                entry.get("label"),
+                entry.get("callback"),
+            )
+            return entry
+        is_home, path = False, tuple(select.path) + (str(entry.get("label")),)
+
+    new_view = make_view(target, is_home, path)
+    msg = getattr(interaction, "message", None) or getattr(select.view, "message", None)
+    new_view.message = msg
+    if select.view is not None:
+        select.view.stop()
+    try:
+        if msg is not None:
+            await msg.edit(view=new_view)
+        else:
+            await interaction.edit_original_response(view=new_view)
+    except Exception:
+        logger.warning("Failed to open thread menu submenu.", exc_info=True)
+    return None
+
+
 
 class Thread:
     """Represents a discord Modmail thread"""
@@ -2690,25 +2771,29 @@ class ThreadManager:
             thread.ready = False  # not ready yet
 
             class _ThreadCreationMenuSelect(discord.ui.Select):
-                def __init__(self, outer_thread: Thread):
+                def __init__(self, outer_thread: Thread, data=None, is_home=True, path=()):
                     self.outer_thread = outer_thread
-                    opts = [
-                        discord.SelectOption(
-                            label=o["label"],
-                            description=o["description"],
-                            emoji=o["emoji"],
-                        )
-                        for o in options.values()
-                    ]
+                    entries, opts = _thread_menu_select_options(options if data is None else data, is_home)
                     super().__init__(
                         placeholder=placeholder,
                         min_values=1,
                         max_values=1,
                         options=opts,
                     )
+                    self.entries = entries
+                    self.path = tuple(path)
 
                 async def callback(self, interaction: discord.Interaction):
                     await interaction.response.defer(ephemeral=False)
+                    selected = await _thread_menu_navigate(
+                        self,
+                        interaction,
+                        options,
+                        submenus,
+                        lambda d, h, p: _ThreadCreationMenuView(self.outer_thread, d, h, p),
+                    )
+                    if selected is None:
+                        return  # a submenu (or the main menu) was opened
                     # If the thread was snoozed before the user selected an option,
                     # restore it first so channel creation/setup & message relay work.
                     try:
@@ -2716,10 +2801,7 @@ class ThreadManager:
                             await self.outer_thread.restore_from_snooze()
                     except Exception:
                         logger.warning("Failed unsnoozing thread prior to menu selection; continuing.")
-                    chosen_label = self.values[0]
-                    # Resolve option key
-                    key = chosen_label.lower().replace(" ", "_")
-                    selected = options.get(key)
+                    chosen_label = " \u2192 ".join(self.path + (str(selected.get("label")),))
                     self.outer_thread._selected_thread_creation_menu_option = selected
                     # Reflect the selection in the original DM by editing the embed/body
                     try:
@@ -2959,10 +3041,10 @@ class ThreadManager:
                                         ctx_.command.checks = old_checks
 
             class _ThreadCreationMenuView(discord.ui.View):
-                def __init__(self, outer_thread: Thread):
+                def __init__(self, outer_thread: Thread, data=None, is_home=True, path=()):
                     super().__init__(timeout=timeout)
                     self.outer_thread = outer_thread
-                    self.add_item(_ThreadCreationMenuSelect(outer_thread))
+                    self.add_item(_ThreadCreationMenuSelect(outer_thread, data, is_home, path))
 
                 async def on_timeout(self):
                     # Timeout -> abort thread creation
@@ -3128,27 +3210,32 @@ class ThreadManager:
                 timeout = 20
 
             options = self.bot.config.get("thread_creation_menu_options") or {}
+            submenus = self.bot.config.get("thread_creation_menu_submenus") or {}
 
             class _PrecreateMenuSelect(discord.ui.Select):
-                def __init__(self, outer_thread: Thread):
+                def __init__(self, outer_thread: Thread, data=None, is_home=True, path=()):
                     self.outer_thread = outer_thread
-                    opts = [
-                        discord.SelectOption(
-                            label=o["label"],
-                            description=o["description"],
-                            emoji=o["emoji"],
-                        )
-                        for o in options.values()
-                    ]
+                    entries, opts = _thread_menu_select_options(options if data is None else data, is_home)
                     super().__init__(
                         placeholder=placeholder,
                         min_values=1,
                         max_values=1,
                         options=opts,
                     )
+                    self.entries = entries
+                    self.path = tuple(path)
 
                 async def callback(self, interaction: discord.Interaction):
                     await interaction.response.defer(ephemeral=False)
+                    selected = await _thread_menu_navigate(
+                        self,
+                        interaction,
+                        options,
+                        submenus,
+                        lambda d, h, p: _PrecreateMenuView(self.outer_thread, d, h, p),
+                    )
+                    if selected is None:
+                        return  # a submenu (or the main menu) was opened
                     # If thread somehow got snoozed before selection in precreate flow (rare), restore first.
                     try:
                         if self.outer_thread.snoozed:
@@ -3158,9 +3245,7 @@ class ThreadManager:
                             "Failed unsnoozing thread prior to precreate menu selection; continuing.",
                             exc_info=True,
                         )
-                    chosen_label = self.values[0]
-                    key = chosen_label.lower().replace(" ", "_")
-                    selected = options.get(key)
+                    chosen_label = " \u2192 ".join(self.path + (str(selected.get("label")),))
                     self.outer_thread._selected_thread_creation_menu_option = selected
                     # Remove the view
                     try:
@@ -3285,9 +3370,10 @@ class ThreadManager:
                                         ctx_.command.checks = old_checks
 
             class _PrecreateMenuView(discord.ui.View):
-                def __init__(self, outer_thread: Thread):
+                def __init__(self, outer_thread: Thread, data=None, is_home=True, path=()):
                     super().__init__(timeout=timeout)
-                    self.add_item(_PrecreateMenuSelect(outer_thread))
+                    self.outer_thread = outer_thread
+                    self.add_item(_PrecreateMenuSelect(outer_thread, data, is_home, path))
 
                 async def on_timeout(self):
                     try:
