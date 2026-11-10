@@ -133,5 +133,14 @@
         "title": "Embed Builder",
         "icon_url": "https://github.com/tomg12345667.png",
         "thumbnail_url": "https://github.com/tomg12345667.png"
+    },
+    "verification": {
+        "repository": "tomg12345667/Modmail",
+        "branch": "master",
+        "description": "Verify new members through Modmail tickets: join roles, welcome DM, keyword autotrigger, ?verify, logs, kick timer and minimum account age.",
+        "bot_version": "4.0.0",
+        "title": "Verification",
+        "icon_url": "https://github.com/tomg12345667.png",
+        "thumbnail_url": "https://github.com/tomg12345667.png"
     }
 }
