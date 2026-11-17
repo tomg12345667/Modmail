@@ -1920,8 +1920,11 @@ class Modmail(commands.Cog):
         ):
             logger.info("Contacting user %s when Modmail DM is disabled.", users[0])
 
+        anonymous = getattr(ctx, "anonymous_contact", False)
         if not silent and not self.bot.config.get("thread_contact_silently"):
-            if creator.id == users[0].id:
+            if anonymous:
+                description = self.bot.config["thread_creation_anon_contact_response"]
+            elif creator.id == users[0].id:
                 description = self.bot.config["thread_creation_self_contact_response"]
             else:
                 description = self.bot.formatter.format(
@@ -1935,16 +1938,31 @@ class Modmail(commands.Cog):
             )
             if self.bot.config["show_timestamp"]:
                 em.timestamp = discord.utils.utcnow()
-            em.set_footer(
-                text=f"{creator}", icon_url=creator.display_avatar.url if creator.display_avatar else None
-            )
+            if anonymous:
+                anon_name = self.bot.config["anon_username"] or "Anonymous"
+                anon_avatar = self.bot.config["anon_avatar_url"] or self.bot.get_guild_icon(
+                    guild=ctx.guild, size=128
+                )
+                em.set_footer(text=anon_name, icon_url=anon_avatar or None)
+            else:
+                em.set_footer(
+                    text=f"{creator}", icon_url=creator.display_avatar.url if creator.display_avatar else None
+                )
 
+            icon_file = await localize_icons(self.bot, em)
             for u in users:
-                await u.send(embed=em)
+                if icon_file is not None:
+                    icon_file.fp.seek(0)
+                    await u.send(
+                        embed=em, file=discord.File(io.BytesIO(icon_file.fp.read()), filename=icon_file.filename)
+                    )
+                else:
+                    await u.send(embed=em)
 
         embed = discord.Embed(
             title="Created Thread",
-            description=f"Thread started by {creator.mention} for {', '.join(u.mention for u in users)}.",
+            description=f"Thread started by {creator.mention} for {', '.join(u.mention for u in users)}."
+            + (" The user wasn't told who opened it." if anonymous else ""),
             color=self.bot.main_color,
         )
         await thread.wait_until_ready()
@@ -1961,6 +1979,35 @@ class Modmail(commands.Cog):
                 await ctx.message.delete(delay=5)
             except (discord.Forbidden, discord.NotFound):
                 pass
+
+    @commands.command(usage="<user> [category] [options]", aliases=["anoncontact"])
+    @checks.has_permissions(PermissionLevel.SUPPORTER)
+    async def pcontact(
+        self,
+        ctx,
+        users: commands.Greedy[
+            Union[
+                Literal["silent", "silently"],
+                discord.Member,
+                discord.User,
+                discord.Role,
+            ]
+        ],
+        *,
+        category: SimilarCategoryConverter = None,
+    ):
+        """
+        Open a thread with a member without showing them who opened it.
+
+        Works like `contact`, but the user's "New Thread" message uses the
+        anonymous name and picture (`anon_username` / `anon_avatar_url`)
+        instead of yours. Staff can still see who opened it in the thread.
+
+        `users` may be a user ID, mention, or name.
+        `category`, if specified, may be a category ID, mention, or name.
+        """
+        ctx.anonymous_contact = True
+        await ctx.invoke(self.contact, users=users, category=category)
 
     @commands.group(invoke_without_command=True)
     @checks.has_permissions(PermissionLevel.MODERATOR)
