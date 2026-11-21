@@ -142,5 +142,14 @@
         "title": "Verification",
         "icon_url": "https://github.com/tomg12345667.png",
         "thumbnail_url": "https://github.com/tomg12345667.png"
+    },
+    "msgcmd": {
+        "repository": "tomg12345667/Modmail",
+        "branch": "master",
+        "description": "Make your own commands that send a message with {variables}: the bot asks for each one, previews and sends it here, to a channel, or as a ticket reply.",
+        "bot_version": "4.0.0",
+        "title": "Message Commands",
+        "icon_url": "https://github.com/tomg12345667.png",
+        "thumbnail_url": "https://github.com/tomg12345667.png"
     }
 }
