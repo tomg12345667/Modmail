@@ -105,6 +105,12 @@ class MessageCommands(commands.Cog, name="Message Commands"):
         async def callback(cog, ctx, *, values: str = None):
             await cog.run(ctx, name, values)
 
+        # discord.py works out which parameters to skip from the function's
+        # qualified name. A function made inside another one looks like a plain
+        # function, so it would treat `ctx` as something the user must type.
+        # Give it a method-style name so `cog` and `ctx` are both skipped.
+        callback.__qualname__ = f"{type(self).__name__}.msgcmd_{name.replace('-', '_')}"
+
         level = PermissionLevel[doc.get("level", "supporter").upper()]
         variables = ", ".join(v["name"] for v in doc.get("variables", [])) or "none"
         cmd = commands.Command(
