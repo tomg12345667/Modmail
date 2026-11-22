@@ -52,7 +52,7 @@ DISCORD_API = os.environ.get("DISCORD_API", "https://discord.com/api").rstrip("/
 DISCORD_AUTHORIZE = os.environ.get("DISCORD_AUTHORIZE", "https://discord.com/oauth2/authorize")
 # Discord user IDs that can see every bot in the list even when one is offline.
 DASH_OWNERS = {x.strip() for x in os.environ.get("DASH_OWNERS", "").split(",") if x.strip()}
-SECURE = PUBLIC_URL.startswith("https://")
+SECURE = os.environ.get("COOKIE_SECURE", "1" if PUBLIC_URL.startswith("https://") else "0") == "1"
 COOKIE = "mmdash"
 SESSION_DAYS = 7
 
@@ -134,6 +134,19 @@ def set_cookie(resp, name, value, max_age):
     resp.set_cookie(name, value, max_age=max_age, httponly=True, secure=SECURE, samesite="Lax", path="/")
 
 
+def clear_cookie(resp, name):
+    # Must carry the same attributes the cookie was set with, or browsers ignore the delete.
+    resp.set_cookie(name, "", max_age=0, expires="Thu, 01 Jan 1970 00:00:00 GMT", httponly=True, secure=SECURE, samesite="Lax", path="/")
+
+
+def safe_next(value):
+    """Only ever send people back to a page on this site."""
+    value = str(value or "")
+    if value.startswith("/#/") or (value.startswith("/logs/") and "//" not in value and ".." not in value):
+        return value
+    return "/"
+
+
 # --------------------------------------------------------------------------- #
 # Middleware: security headers
 # --------------------------------------------------------------------------- #
@@ -186,6 +199,7 @@ async def login(request):
     )
     resp = web.HTTPFound(f"{DISCORD_AUTHORIZE}?{q}")
     set_cookie(resp, "mmdash_state", state, 600)
+    set_cookie(resp, "mmdash_next", safe_next(request.query.get("next")), 600)
     raise resp
 
 
@@ -227,9 +241,10 @@ async def callback(request):
             if r.status != 200:
                 return _error_page("Couldn't read your Discord account.")
             user = await r.json()
-    resp = web.HTTPFound("/")
+    resp = web.HTTPFound(safe_next(request.cookies.get("mmdash_next")))
     set_cookie(resp, COOKIE, make_session(user), SESSION_DAYS * 86400)
-    resp.del_cookie("mmdash_state", path="/")
+    clear_cookie(resp, "mmdash_state")
+    clear_cookie(resp, "mmdash_next")
     raise resp
 
 
@@ -243,10 +258,24 @@ def _require(request, *, csrf=False):
 
 
 async def logout(request):
-    _require(request, csrf=True)
+    sess = read_session(request)
+    if sess is not None and not hmac.compare_digest(request.headers.get("X-CSRF", ""), sess["csrf"]):
+        raise web.HTTPForbidden(text=json.dumps({"error": "Refresh the page and try again."}), content_type="application/json")
     resp = web.json_response({"ok": True})
-    resp.del_cookie(COOKIE, path="/")
+    clear_cookie(resp, COOKIE)
+    resp.headers["Clear-Site-Data"] = '"cookies"'
     return resp
+
+
+async def log_link(request):
+    """Log links posted in Discord: /logs/<bot>/<key> opens that log in the dashboard."""
+    bid, key = request.match_info["bot"], request.match_info["key"]
+    if bot_by_id(bid) is None:
+        raise web.HTTPNotFound(text="That bot isn't in this dashboard.")
+    target = f"/#/{urllib.parse.quote(bid)}/logs/{urllib.parse.quote(key)}"
+    if read_session(request):
+        raise web.HTTPFound(target)
+    raise web.HTTPFound("/login?" + urllib.parse.urlencode({"next": target}))
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +299,7 @@ async def session_info(request):
             if status != 200:
                 return None
             me = json.loads(raw)
-            if not any(me["can"].values()):
+            if not any(me["can"].values()) and not me.get("shared"):
                 return None
             return {"id": bot["id"], "name": bot.get("name") or me["bot"]["name"], "online": True, **me}
         except Exception:
@@ -325,6 +354,7 @@ def make_app():
     app.router.add_get("/login", login)
     app.router.add_get("/callback", callback)
     app.router.add_post("/logout", logout)
+    app.router.add_get("/logs/{bot}/{key}", log_link)
     app.router.add_get("/api/session", session_info)
     app.router.add_route("*", "/api/bot/{bot}/{tail:.*}", proxy)
     app.router.add_static("/static/", STATIC, show_index=False)

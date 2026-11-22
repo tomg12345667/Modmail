@@ -219,10 +219,10 @@ class ModmailBot(commands.Bot):
 
     @property
     def log_links_enabled(self) -> bool:
-        """Web log links only exist with MongoDB+logviewer or the built-in viewer."""
+        """Web log links exist with MongoDB+logviewer, the built-in viewer, or the web dashboard."""
         if (self.config["database_type"] or "json").lower() == "mongodb":
             return True
-        return bool(self.config["log_viewer_port"])
+        return bool(self.config["log_viewer_port"] or self.config["dash_api_port"])
 
     @property
     def db(self):

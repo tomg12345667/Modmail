@@ -186,6 +186,10 @@ class DashboardAPI:
         r.add_delete("/api/blocks/{kind}/{id}", self.blocks_delete)
         r.add_get("/api/logs", self.logs_list)
         r.add_get("/api/logs/{key}", self.logs_get)
+        r.add_get("/api/logs/{key}/grants", self.grants_get)
+        r.add_post("/api/logs/{key}/grants", self.grants_post)
+        r.add_delete("/api/logs/{key}/grants/{user}", self.grants_delete)
+        r.add_get("/api/shared", self.shared_get)
         r.add_get("/api/threads", self.threads_get)
         r.add_get("/api/threadmenu", self.menu_get)
         r.add_put("/api/threadmenu", self.menu_put)
@@ -279,7 +283,85 @@ class DashboardAPI:
     async def me(self, request):
         uid = request["uid"]
         caps = {cap: await self.allowed(uid, cap) for cap in CAPABILITIES}
-        return web.json_response({"level": await self.level_name(uid), "can": caps, "bot": self._bot_card()})
+        shared = len(await self._active_grants(user_id=uid))
+        return web.json_response(
+            {"level": await self.level_name(uid), "can": caps, "shared": shared, "bot": self._bot_card()}
+        )
+
+    # ---- temporary log access ("Share this log") ------------------------- #
+    @property
+    def _grants(self):
+        return self.bot.api.db["dashboard_grants"]
+
+    async def _active_grants(self, *, user_id=None, key=None):
+        query = {}
+        if user_id is not None:
+            query["user_id"] = str(user_id)
+        if key is not None:
+            query["key"] = key
+        now = discord.utils.utcnow().isoformat()
+        out = []
+        for g in await self._grants.find(query).to_list(None):
+            if str(g.get("expires", "")) > now:
+                out.append(g)
+            else:
+                await self._grants.delete_one({"_id": g["_id"]})  # tidy up expired access
+        return out
+
+    async def _can_read_log(self, uid, key):
+        if await self.allowed(uid, "logs"):
+            return True
+        return bool(await self._active_grants(user_id=uid, key=key))
+
+    async def grants_get(self, request):
+        await self.need(request, "logs")
+        key = request.match_info["key"]
+        rows = []
+        for g in await self._active_grants(key=key):
+            rows.append({**self._name_for(g["user_id"]), "expires": g["expires"], "granted_by": g.get("granted_by")})
+        return web.json_response(rows)
+
+    async def grants_post(self, request):
+        await self.need(request, "logs")
+        key = request.match_info["key"]
+        if not await self.bot.api.logs.find_one({"key": key, "guild_id": str(self.bot.guild_id)}):
+            raise ApiError("Log not found.", 404)
+        body = await request.json()
+        target = str(body.get("user_id", "")).strip()
+        if not target.isdigit() or not 15 <= len(target) <= 20:
+            raise ApiError("Enter a Discord user ID (15-20 digits).")
+        try:
+            hours = int(body.get("hours", 24))
+        except (TypeError, ValueError):
+            raise ApiError("Pick how long they can see it.")
+        if not 1 <= hours <= 720:
+            raise ApiError("Access can last from 1 hour to 30 days.")
+        from datetime import timedelta
+
+        who = self._member(request["uid"])
+        expires = (discord.utils.utcnow() + timedelta(hours=hours)).isoformat()
+        await self._grants.replace_one(
+            {"_id": f"{key}:{target}"},
+            {"_id": f"{key}:{target}", "key": key, "user_id": target, "expires": expires,
+             "granted_by": getattr(who, "name", str(request["uid"]))},
+            upsert=True,
+        )
+        return web.json_response({"ok": True, "expires": expires, **self._name_for(target)})
+
+    async def grants_delete(self, request):
+        await self.need(request, "logs")
+        res = await self._grants.delete_one({"_id": f"{request.match_info['key']}:{request.match_info['user']}"})
+        if not res.deleted_count:
+            raise ApiError("They didn't have access.", 404)
+        return web.json_response({"ok": True})
+
+    async def shared_get(self, request):
+        out = []
+        for g in await self._active_grants(user_id=request["uid"]):
+            doc = await self.bot.api.logs.find_one({"key": g["key"], "guild_id": str(self.bot.guild_id)})
+            if doc:
+                out.append({**self._log_card(doc), "expires": g["expires"], "granted_by": g.get("granted_by")})
+        return web.json_response(out)
 
     def _bot_card(self):
         user = self.bot.user
@@ -670,12 +752,19 @@ class DashboardAPI:
         return web.json_response({"total": total, "page": page, "per_page": per, "logs": [self._log_card(d) for d in docs]})
 
     async def logs_get(self, request):
-        await self.need(request, "logs")
+        if not await self._can_read_log(request["uid"], request.match_info["key"]):
+            raise ApiError("You don't have permission for this.", 403)
         doc = await self.bot.api.logs.find_one({"key": request.match_info["key"], "guild_id": str(self.bot.guild_id)})
         if not doc:
             raise ApiError("Log not found.", 404)
         card = self._log_card(doc)
         card["close_message"] = doc.get("close_message")
+        staff = await self.allowed(request["uid"], "logs")
+        card["shared_view"] = not staff
+        messages = doc.get("messages") or []
+        if not staff:
+            # People a log is shared with see what the member saw: no staff notes.
+            messages = [m for m in messages if m.get("type") not in ("note", "internal", "persistent_note")]
         card["messages"] = [
             {
                 "author": {
@@ -692,7 +781,7 @@ class DashboardAPI:
                     for a in (m.get("attachments") or [])
                 ],
             }
-            for m in doc.get("messages") or []
+            for m in messages
         ]
         return web.json_response(card)
 

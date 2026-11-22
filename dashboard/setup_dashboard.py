@@ -42,6 +42,23 @@ def append_env(path, values):
             fp.write(f"{k}={v}\n")
 
 
+def set_env(path, key, value):
+    """Set KEY=value in an .env file, replacing an existing line if there is one."""
+    lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
+    out, done = [], False
+    for line in lines:
+        if line.split("=", 1)[0].strip() == key and not line.lstrip().startswith("#"):
+            if not done:
+                out.append(f"{key}={value}")
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(f"{key}={value}")
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write("\n".join(out) + "\n")
+
+
 def pm2_name(folder):
     try:
         with open(os.path.join(folder, "ecosystem.config.js"), encoding="utf-8") as fp:
@@ -125,6 +142,25 @@ def main():
         print(f"Saved {dash_env}")
     else:
         print(f"Kept your existing {dash_env}")
+
+    # Log links in Discord can open in the dashboard instead of a separate log viewer.
+    public_url = read_env(dash_env).get("PUBLIC_URL", "").rstrip("/")
+    if public_url:
+        want = [
+            (f, e["id"]) for f, e in zip(bots, entries)
+            if read_env(os.path.join(f, ".env")).get("LOG_URL", "").rstrip("/") != public_url
+            or read_env(os.path.join(f, ".env")).get("LOG_URL_PREFIX", "") != f"/logs/{e['id']}"
+        ]
+        if want:
+            answer = ask(f"\nOpen log links from Discord in the dashboard ({public_url}/logs/...)? [Y/n]", "Y")
+            if answer.lower().startswith("y"):
+                for folder, bot_id in want:
+                    env_path = os.path.join(folder, ".env")
+                    set_env(env_path, "LOG_URL", public_url)
+                    set_env(env_path, "LOG_URL_PREFIX", f"/logs/{bot_id}")
+                print(f"  Log links updated for {len(want)} bot(s).")
+        else:
+            print("Log links already open in the dashboard.")
 
     names = " ".join(pm2_name(f) or os.path.basename(f) for f in bots)
     print("\nNext:")

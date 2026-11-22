@@ -136,7 +136,8 @@ function memberPicker(onPick, buttonLabel) {
  * Navigation
  * ------------------------------------------------------------------ */
 const SECTIONS = [
-  { id: "overview", label: "Overview" },
+  { id: "overview", label: "Overview", cap: "_staff" },
+  { id: "shared", label: "Shared with you", cap: "_shared" },
   { id: "tickets", label: "Open tickets", cap: "logs" },
   { id: "logs", label: "Logs", cap: "logs" },
   { group: "Tickets" },
@@ -153,7 +154,14 @@ const SECTIONS = [
   { id: "settings", label: "Settings", cap: "settings" },
   { id: "plugins", label: "Plugins", cap: "plugins" },
 ];
-const can = (cap) => !cap || (state.bot && state.bot.can && state.bot.can[cap]);
+const can = (cap) => {
+  const b = state.bot;
+  if (!cap) return true;
+  if (!b || !b.can) return false;
+  if (cap === "_staff") return Object.values(b.can).some(Boolean);
+  if (cap === "_shared") return (b.shared || 0) > 0;
+  return !!b.can[cap];
+};
 
 function go(section, arg) {
   location.hash = `#/${encodeURIComponent(state.bot.id)}/${section}${arg ? "/" + encodeURIComponent(arg) : ""}`;
@@ -169,7 +177,7 @@ function renderRail() {
   const rail = document.getElementById("rail");
   fill(rail, );
   for (const b of state.session.bots) {
-    const lampClass = !b.online ? "lamp" : ["OWNER", "ADMINISTRATOR"].includes(b.level) ? "lamp on" : "lamp amber";
+    const lampClass = !b.online ? "lamp" : ["OWNER", "ADMINISTRATOR"].includes(b.level) ? "lamp on" : "lamp amber";  // amber: limited access
     const avatar = (b.bot && (b.bot.icon || b.bot.avatar)) || "https://cdn.discordapp.com/embed/avatars/0.png";
     rail.append(h("button", {
       class: "line", title: `${b.name}${b.online ? "" : " (offline)"}`, "aria-label": b.name,
@@ -180,7 +188,11 @@ function renderRail() {
   }
   const u = state.session.user;
   rail.append(h("div", { class: "me" }, h("img", { src: u.avatar, alt: "", title: u.name, onerror: (e) => { e.target.style.visibility = "hidden"; } }),
-    h("button", { text: "Sign out", onclick: async () => { await http("POST", "/logout"); location.href = "/"; } })));
+    h("button", { text: "Sign out", onclick: async () => {
+      try { await http("POST", "/logout"); } catch (e) { /* signed out either way */ }
+      state.session = null;
+      location.replace("/");
+    } })));
 }
 
 function renderSections() {
@@ -188,7 +200,7 @@ function renderSections() {
   fill(nav, );
   if (!state.bot) return;
   nav.append(h("div", { class: "bot-name", text: state.bot.name },
-    h("small", { text: state.bot.online ? `You're ${LEVEL_NAMES[state.bot.level] || "on staff"} here` : "Offline" })));
+    h("small", { text: !state.bot.online ? "Offline" : can("_staff") ? `You're ${LEVEL_NAMES[state.bot.level] || "on staff"} here` : "Logs shared with you" })));
   let pendingGroup = null;
   for (const s of SECTIONS) {
     if (s.group) { pendingGroup = s.group; continue; }
@@ -213,7 +225,10 @@ async function route() {
   const bot = bots.find((b) => b.id === bid) || bots[0];
   if (!state.bot || state.bot.id !== bot.id) state.guild = null;
   state.bot = bot;
-  const sec = section && SECTIONS.find((s) => s.id && s.id === section && can(s.cap)) ? section : "overview";
+  const home = can("_staff") ? "overview" : "shared";
+  let sec = section && SECTIONS.find((s) => s.id && s.id === section && can(s.cap)) ? section : home;
+  // A log link opened by someone it was shared with (not staff): show it in "Shared with you".
+  if (section === "logs" && arg && !can("logs") && can("_shared")) sec = "shared";
   state.section = sec;
   state.arg = arg || null;
   renderRail();
@@ -286,7 +301,7 @@ VIEWS.tickets = async (el) => {
 };
 
 VIEWS.logs = async (el) => {
-  if (state.arg) return renderLog(el, state.arg);
+  if (state.arg) return renderLog(el, state.arg, "logs");
   const params = new URLSearchParams(location.search);
   let page = 0, q = "";
   const input = h("input", { type: "search", placeholder: "Search by name, user ID, log key or message text" });
@@ -318,7 +333,7 @@ VIEWS.logs = async (el) => {
   await load();
 };
 
-async function renderLog(el, key) {
+async function renderLog(el, key, back) {
   const l = await api("GET", "logs/" + encodeURIComponent(key));
   const tr = h("div", { class: "transcript" });
   for (const m of l.messages) {
@@ -333,11 +348,66 @@ async function renderLog(el, key) {
         h("div", { class: "body", text: m.content }), atts.length ? h("div", { class: "att" }, atts) : null)));
   }
   if (!l.messages.length) tr.append(h("p", { class: "empty", text: "This log has no messages." }));
-  fill(el, 
-    h("p", {}, h("a", { href: `#/${state.bot.id}/logs`, text: "Back to logs" })),
+  fill(el,
+    h("p", {}, h("a", { href: `#/${state.bot.id}/${back}`, text: back === "shared" ? "Back to shared logs" : "Back to logs" })),
     pageHead(l.recipient.name, `Opened ${when(l.created_at)}` + (l.open ? ", still open" : `, closed ${when(l.closed_at)}${l.closer ? " by " + l.closer.name : ""}`)),
+    l.shared_view ? h("p", { class: "muted small", text: "This conversation was shared with you. Staff-only notes aren't shown." }) : null,
+    can("logs") ? await sharePanel(l) : null,
     l.close_message ? h("div", { class: "note", text: "Closing message: " + l.close_message }) : null, tr);
 }
+
+/* Give someone temporary access to one log. */
+async function sharePanel(l) {
+  const grants = await api("GET", `logs/${encodeURIComponent(l.key)}/grants`);
+  const link = `${location.origin}/logs/${encodeURIComponent(state.bot.id)}/${encodeURIComponent(l.key)}`;
+  const hours = h("select", { "aria-label": "For how long" },
+    h("option", { value: "1", text: "for 1 hour" }), h("option", { value: "24", text: "for 1 day" }),
+    h("option", { value: "168", text: "for 7 days" }), h("option", { value: "720", text: "for 30 days" }));
+  hours.value = "24";
+  const share = async (id, name) => {
+    try {
+      await api("POST", `logs/${encodeURIComponent(l.key)}/grants`, { user_id: id, hours: Number(hours.value) });
+      toast(`${name} can see this log ${hours.selectedOptions[0].text}. Send them the link.`);
+      route();
+    } catch (e) { toast(e.message, true); }
+  };
+  const list = h("ul", { class: "list" });
+  for (const g of grants) {
+    list.append(h("li", {}, h("div", { class: "main" }, h("div", { class: "title", text: g.name }),
+      h("div", { class: "sub", text: `Until ${when(g.expires)}${g.granted_by ? ", shared by " + g.granted_by : ""}` })),
+      h("div", { class: "actions" }, h("button", { class: "btn quiet danger", text: "Remove access", onclick: async (e) => busy(e.target, async () => {
+        await api("DELETE", `logs/${encodeURIComponent(l.key)}/grants/${g.id}`); toast(`Removed ${g.name}'s access.`); route();
+      }) }))));
+  }
+  const copy = h("button", { class: "btn", text: "Copy link", onclick: async () => {
+    try { await navigator.clipboard.writeText(link); toast("Link copied."); } catch (e) { toast(link); }
+  } });
+  const panel = h("details", { class: "panel share" + (grants.length ? " has" : "") },
+    h("summary", { text: grants.length ? `Shared with ${grants.length} ${grants.length === 1 ? "person" : "people"}` : "Share this log" }),
+    h("p", { class: "muted small", text: "Let someone outside your staff read this conversation for a while, like the member who opened it or someone reviewing an appeal. They sign in with Discord and only see logs shared with them. Staff-only notes are hidden from them." }),
+    h("div", { class: "row" }, h("span", { class: "grow mono small", text: link }), copy),
+    h("div", { class: "row mt" }, hours,
+      l.recipient.id ? h("button", { class: "btn primary", text: `Share with ${l.recipient.name}`, onclick: () => share(l.recipient.id, l.recipient.name) }) : null),
+    h("h3", { class: "mt", text: "Or share with someone else" }),
+    memberPicker((id, name) => share(id, name), "Share"),
+    grants.length ? h("h3", { class: "mt", text: "Who can see it" }) : null, grants.length ? list : null);
+  if (grants.length) panel.open = true;
+  return panel;
+}
+
+VIEWS.shared = async (el) => {
+  if (state.arg) return renderLog(el, state.arg, "shared");
+  const rows = await api("GET", "shared");
+  const list = h("ul", { class: "list" });
+  for (const l of rows) {
+    list.append(h("li", { class: "click", tabindex: "0", onclick: () => go("shared", l.key), onkeydown: (e) => { if (e.key === "Enter") go("shared", l.key); } },
+      h("div", { class: "main" }, h("div", { class: "title", text: l.recipient.name }),
+        h("div", { class: "sub", text: `Opened ${when(l.created_at)}. You can see it until ${when(l.expires)}.` })),
+      h("div", { class: "actions" }, h("button", { class: "btn", text: "Read", onclick: (e) => { e.stopPropagation(); go("shared", l.key); } }))));
+  }
+  if (!rows.length) list.append(h("li", { class: "empty", text: "Nothing is shared with you right now. Shared access expires after a while." }));
+  fill(el, pageHead("Shared with you", `Conversations from ${state.bot.name} that staff have let you read.`), list);
+};
 
 /* ---- snippets / aliases / autotriggers -------------------------------- */
 const KV = {

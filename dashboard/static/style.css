@@ -163,6 +163,11 @@ tr.click:hover td { background: var(--surface); }
 .w-color { width: 120px; }
 details summary { cursor: pointer; font-weight: 600; }
 
+.panel.share summary { font-weight: 600; cursor: pointer; }
+.panel.share[open] summary { margin-bottom: 10px; }
+.list > li.click { cursor: pointer; }
+.list > li.click:hover { background: var(--surface); }
+
 /* ---------- messages ---------- */
 .toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
 .toast { background: var(--navy); color: #fff; padding: 10px 14px; border-radius: 8px; max-width: 380px; box-shadow: 0 6px 20px rgba(0, 0, 0, .25); }
