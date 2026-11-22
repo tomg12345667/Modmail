@@ -99,9 +99,10 @@ def main():
             add["DASH_API_SECRET"] = secret
         if add:
             append_env(env_path, add)
-        name = existing.get(bot_id, {}).get("name") or bot_id.replace("-modmail", "").replace("-", " ").title()
+        # Leave the name empty to show the bot's real server name (e.g. "RingNet"); set one in bots.json to override it.
+        name = existing.get(bot_id, {}).get("name", "")
         entries.append({"id": bot_id, "name": name, "url": f"http://127.0.0.1:{port}", "secret": secret})
-        print(f"  + {name:<22} port {port}  ({'new settings added' if add else 'already set up'})  [{folder}]")
+        print(f"  + {bot_id:<26} port {port}  ({'new settings added' if add else 'already set up'})")
 
     with open(bots_file, "w", encoding="utf-8") as fp:
         json.dump(entries, fp, indent=2)
