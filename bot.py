@@ -523,6 +523,19 @@ class ModmailBot(commands.Bot):
             return PermissionLevel.INVALID
         return level
 
+    async def _start_dashboard_api(self):
+        port = self.config["dash_api_port"]
+        if not port:
+            return
+        try:
+            from core.dashapi import DashboardAPI
+
+            if getattr(self, "_dash_api", None) is None:
+                self._dash_api = DashboardAPI(self)
+            await self._dash_api.start(int(port))
+        except Exception:
+            logger.error("Failed to start the dashboard API.", exc_info=True)
+
     async def _start_log_viewer(self):
         port = self.config["log_viewer_port"]
         if not port:
@@ -547,6 +560,7 @@ class ModmailBot(commands.Bot):
         await self.config.refresh()
         await self.api.setup_indexes()
         await self._start_log_viewer()
+        await self._start_dashboard_api()
         await self.load_extensions()
         self._connected.set()
 

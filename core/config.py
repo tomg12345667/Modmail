@@ -211,6 +211,9 @@ class ConfigManager:
         "data_dir": None,
         "log_viewer_port": None,
         "log_viewer_host": "0.0.0.0",
+        # private API for the central web dashboard (localhost only)
+        "dash_api_port": None,
+        "dash_api_secret": None,
         "connection_uri": None,  # replace mongo uri in the future
         "owners": None,
         "enable_presence_intent": False,
