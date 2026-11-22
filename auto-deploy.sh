@@ -9,6 +9,10 @@
 #   bash ~/auto-deploy.sh --init   mark the current commit as already deployed
 #   bash ~/auto-deploy.sh --force  deploy the latest commit even if it was tried before
 #
+# It also keeps the web dashboard (~/modmail-dashboard) up to date: when the
+# dashboard/ folder changes on GitHub, the new files are copied in (your .env,
+# bots.json and .venv are never touched) and the dashboard is restarted.
+#
 # History is written to ~/modmail-deploy.log
 
 set -uo pipefail
@@ -19,6 +23,8 @@ BRANCH="${BRANCH:-master}"
 SRC="${SRC:-$HOME/modmail-src}"            # a copy of the repo, used only for building updates
 UPDATER="${UPDATER:-$HOME/update-bots.sh}"
 STATE="${STATE:-$HOME/.modmail-deploy}"
+DASH_DIR="${DASH_DIR:-$HOME/modmail-dashboard}"
+DASH_PM2="${DASH_PM2:-modmail-dashboard}"
 LOG="${LOG:-$HOME/modmail-deploy.log}"
 
 # The parts of the repo that make up the bot. .env, data/ and installed
@@ -60,14 +66,45 @@ case "${1:-}" in
     rm -f "$STATE/failed"; FAILED=""; LAST="";;
 esac
 
-[ "$NEW" = "$LAST" ] && exit 0
+deploy_dashboard() {
+  [ -d "$DASH_DIR" ] || return 0                       # dashboard not installed on this server
+  local tree; tree=$(git -C "$SRC" rev-parse "$NEW:dashboard" 2>/dev/null) || return 0
+  [ "$tree" = "$(cat "$STATE/dashboard" 2>/dev/null)" ] && return 0
+  local old_req; old_req=$(sha256sum "$DASH_DIR/requirements.txt" 2>/dev/null | cut -d' ' -f1)
+  # Only files kept in git are copied, so .env, bots.json and .venv stay as they are.
+  if ! git -C "$SRC" archive "$NEW" dashboard | tar -x --strip-components=1 -C "$DASH_DIR"; then
+    log "ERROR: couldn't copy the dashboard update"; return 1
+  fi
+  if [ -x "$DASH_DIR/.venv/bin/pip" ] && [ "$old_req" != "$(sha256sum "$DASH_DIR/requirements.txt" | cut -d' ' -f1)" ]; then
+    "$DASH_DIR/.venv/bin/pip" install -q -r "$DASH_DIR/requirements.txt" >>"$LOG" 2>&1 || log "WARNING: dashboard packages didn't install"
+  fi
+  if command -v pm2 >/dev/null && pm2 describe "$DASH_PM2" >/dev/null 2>&1; then
+    pm2 restart "$DASH_PM2" --update-env >/dev/null 2>&1 && log "Dashboard updated to $SHORT and restarted" || log "WARNING: dashboard updated but didn't restart"
+  else
+    log "Dashboard files updated to $SHORT (start it with: cd $DASH_DIR && pm2 start ecosystem.config.js)"
+  fi
+  echo "$tree" > "$STATE/dashboard"
+}
+
+[ "$NEW" = "$LAST" ] && { deploy_dashboard; exit 0; }
 if [ "$NEW" = "$FAILED" ]; then
+  deploy_dashboard
   exit 0   # this commit already failed; wait for a newer one (or use --force)
 fi
 
 git -C "$SRC" reset -q --hard "origin/$BRANCH"
 MSG=$(git -C "$SRC" log -1 --format='%s' "$NEW")
 log "New commit $SHORT: $MSG"
+deploy_dashboard
+
+existing_paths() { for p in "${DEPLOY_PATHS[@]}"; do [ -e "$SRC/$p" ] && echo "$p"; done; }
+# Commits that only change the dashboard (or docs) don't need the bots restarted.
+if [ -n "$LAST" ] && git -C "$SRC" cat-file -e "$LAST" 2>/dev/null \
+   && git -C "$SRC" diff --quiet "$LAST" "$NEW" -- $(existing_paths); then
+  echo "$NEW" > "$STATE/deployed"; rm -f "$STATE/failed"
+  log "No bot changes in $SHORT; bots left running"
+  exit 0
+fi
 
 ZIP="$STATE/modmail-update-$SHORT.zip"
 rm -f "$STATE"/modmail-update-*.zip
