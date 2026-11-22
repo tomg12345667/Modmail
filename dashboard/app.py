@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import secrets
 import time
@@ -23,6 +24,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
+log = logging.getLogger("dashboard")
 
 
 # --------------------------------------------------------------------------- #
@@ -114,20 +116,30 @@ def make_session(user: dict) -> str:
     return f"{raw}.{_sign(raw.encode())}"
 
 
-def read_session(request):
+def session_problem(request):
+    """Why there's no valid session (for the server log), or None if the session is fine."""
     value = request.cookies.get(COOKIE, "")
+    if not value:
+        return "no sign-in cookie was sent by the browser"
     if "." not in value:
-        return None
+        return "the sign-in cookie is damaged"
     raw, sig = value.rsplit(".", 1)
     if not hmac.compare_digest(sig, _sign(raw.encode())):
-        return None
+        return "the sign-in cookie was made with a different SESSION_SECRET"
     try:
         payload = json.loads(base64.urlsafe_b64decode(raw.encode()))
     except ValueError:
-        return None
+        return "the sign-in cookie is damaged"
     if payload.get("exp", 0) < time.time():
+        return "the sign-in expired"
+    return None
+
+
+def read_session(request):
+    if session_problem(request):
         return None
-    return payload
+    raw = request.cookies[COOKIE].rsplit(".", 1)[0]
+    return json.loads(base64.urlsafe_b64decode(raw.encode()))
 
 
 def set_cookie(resp, name, value, max_age):
@@ -169,6 +181,9 @@ async def headers(request, handler):
     resp.headers.setdefault("X-Frame-Options", "DENY")
     if request.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
+    elif request.path.startswith("/static/"):
+        # Versioned links (?v=...) change with every update, so a cached copy is never stale.
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable" if request.query.get("v") else "no-cache"
     if isinstance(resp, web.HTTPException):
         raise resp
     return resp
@@ -177,12 +192,41 @@ async def headers(request, handler):
 # --------------------------------------------------------------------------- #
 # Pages + sign-in
 # --------------------------------------------------------------------------- #
+def _asset_version(name):
+    """Short fingerprint of a static file, so browsers and Cloudflare fetch the new copy after an update."""
+    try:
+        with open(os.path.join(STATIC, name), "rb") as fp:
+            return hashlib.sha256(fp.read()).hexdigest()[:10]
+    except OSError:
+        return "0"
+
+
 def _page(name):
-    return web.FileResponse(os.path.join(STATIC, name), headers={"Cache-Control": "no-cache"})
+    with open(os.path.join(STATIC, name), encoding="utf-8") as fp:
+        page = fp.read()
+    for asset in ("app.js", "style.css"):
+        page = page.replace(f"/static/{asset}", f"/static/{asset}?v={_asset_version(asset)}")
+    return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 async def index(request):
-    return _page("app.html" if read_session(request) else "login.html")
+    if read_session(request):
+        resp = _page("app.html")
+        if request.cookies.get("mmdash_signedin"):
+            resp.del_cookie("mmdash_signedin", path="/")
+        return resp
+    if request.cookies.get("mmdash_signedin"):
+        # They finished signing in moments ago, yet the session didn't come back: say why instead of looping.
+        why = session_problem(request)
+        log.warning("Sign-in didn't stick for %s: %s (address %s)", request.remote, why, request.host)
+        resp = _error_page(
+            "You signed in, but your browser didn't keep the sign-in. "
+            + ("Make sure you're using " + PUBLIC_URL + " (the same address as the dashboard's PUBLIC_URL), "
+               "and that cookies aren't blocked for this site." if why.startswith("no sign-in cookie") else why[0].upper() + why[1:] + ".")
+        )
+        clear_cookie(resp, "mmdash_signedin")
+        return resp
+    return _page("login.html")
 
 
 async def login(request):
@@ -204,14 +248,14 @@ async def login(request):
 
 
 def _error_page(message):
-    html = (
+    page = (
         "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Sign-in problem</title><link rel=stylesheet href='/static/style.css'>"
         "<main class='signin'><div class='signin-box'><h1>Sign-in didn't work</h1>"
         f"<p>{html.escape(message)}</p>"
         "<p><a class='btn primary' href='/login'>Try again</a></p></div></main>"
     )
-    return web.Response(text=html, content_type="text/html", status=400)
+    return web.Response(text=page, content_type="text/html", status=400, headers={"Cache-Control": "no-store"})
 
 
 async def callback(request):
@@ -241,8 +285,12 @@ async def callback(request):
             if r.status != 200:
                 return _error_page("Couldn't read your Discord account.")
             user = await r.json()
-    resp = web.HTTPFound(safe_next(request.cookies.get("mmdash_next")))
+    target = safe_next(request.cookies.get("mmdash_next"))
+    log.info("Signed in: %s (%s), going to %s", user.get("username"), user.get("id"), target)
+    resp = web.HTTPFound(target)
     set_cookie(resp, COOKIE, make_session(user), SESSION_DAYS * 86400)
+    # Not secret: lets the next page tell "sign-in didn't stick" apart from "never signed in". Not HttpOnly-critical.
+    resp.set_cookie("mmdash_signedin", "1", max_age=120, httponly=True, secure=False, samesite="Lax", path="/")
     clear_cookie(resp, "mmdash_state")
     clear_cookie(resp, "mmdash_next")
     raise resp
@@ -263,6 +311,7 @@ async def logout(request):
         raise web.HTTPForbidden(text=json.dumps({"error": "Refresh the page and try again."}), content_type="application/json")
     resp = web.json_response({"ok": True})
     clear_cookie(resp, COOKIE)
+    resp.del_cookie("mmdash_signedin", path="/")
     resp.headers["Clear-Site-Data"] = '"cookies"'
     return resp
 
@@ -365,5 +414,6 @@ def make_app():
 
 if __name__ == "__main__":
     check_settings()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     print(f"Modmail dashboard on http://{HOST}:{PORT} (public address {PUBLIC_URL})")
     web.run_app(make_app(), host=HOST, port=PORT, print=None, access_log=None)
