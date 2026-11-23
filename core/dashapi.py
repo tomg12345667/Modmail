@@ -45,6 +45,7 @@ CAPABILITIES = {
     "dm": "enable",
     "verification": "verification setup",
     "msgcmd": "msgcmd create",
+    "reactions": "rr add",
 }
 
 MENU_KEYS = ("thread_creation_menu_options", "thread_creation_menu_submenus")
@@ -202,6 +203,12 @@ class DashboardAPI:
         r.add_get("/api/msgcmd", self.msgcmd_get)
         r.add_put("/api/msgcmd/{name}", self.msgcmd_put)
         r.add_delete("/api/msgcmd/{name}", self.msgcmd_delete)
+        r.add_get("/api/reactions", self.reactions_get)
+        r.add_post("/api/reactions/menus", self.reactions_menu_create)
+        r.add_put("/api/reactions/menus/{message_id}", self.reactions_menu_put)
+        r.add_delete("/api/reactions/menus/{message_id}", self.reactions_menu_delete)
+        r.add_put("/api/reactions/auto/{channel_id}", self.reactions_auto_put)
+        r.add_delete("/api/reactions/auto/{channel_id}", self.reactions_auto_delete)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
         await web.TCPSite(self.runner, host, port).start()
@@ -396,7 +403,7 @@ class DashboardAPI:
         )
 
     async def guild_info(self, request):
-        if not any([await self.allowed(request["uid"], c) for c in ("permissions", "settings", "verification", "msgcmd", "threadmenu", "blocks")]):
+        if not any([await self.allowed(request["uid"], c) for c in ("permissions", "settings", "verification", "msgcmd", "threadmenu", "blocks", "reactions")]):
             raise ApiError("You don't have permission for this.", 403)
         out = {}
         for label, g in (("staff", self.bot.modmail_guild), ("main", self.bot.guild)):
@@ -415,6 +422,7 @@ class DashboardAPI:
                     for c in g.text_channels
                 ],
                 "categories": [{"id": str(c.id), "name": c.name} for c in g.categories],
+                "emojis": [{"id": str(e.id), "name": e.name, "text": str(e), "url": str(e.url)} for e in getattr(g, "emojis", [])],
             }
         return web.json_response(out)
 
@@ -1000,4 +1008,167 @@ class DashboardAPI:
         await cog.db.delete_one({"_id": f"msgcmd-{name}"})
         cog.data.pop(name, None)
         cog._unregister(name)
+        return web.json_response({"ok": True})
+
+    # ---- reactions plugin (reaction roles + auto reactions) --------------- #
+    def _reactions(self):
+        cog = self.bot.get_cog("Reactions")
+        if cog is None:
+            raise ApiError("The reactions plugin isn't installed on this bot.", 404)
+        mod = sys.modules[type(cog).__module__]
+        return cog, mod
+
+    async def _reaction_call(self, coro, mod):
+        try:
+            return await coro
+        except mod.ReactionError as e:
+            raise ApiError(str(e))
+        except discord.HTTPException as e:
+            raise ApiError(f"Discord refused: {e.text or e}")
+
+    def _menu_out(self, menu):
+        guild = self.bot.get_guild(int(menu["guild_id"]))
+        channel = self.bot.get_channel(int(menu["channel_id"]))
+        roles = []
+        for r in menu["roles"]:
+            role = guild.get_role(int(r["role_id"])) if guild else None
+            roles.append({**r, "role_name": role.name if role else None})
+        return {
+            **self._serial(menu), "roles": roles, "channel_name": channel.name if channel else None,
+            "link": f"https://discord.com/channels/{menu['guild_id']}/{menu['channel_id']}/{menu['message_id']}",
+        }
+
+    def _menu_by_id(self, cog, raw):
+        menu = cog.menus.get(int(raw)) if str(raw).isdigit() else None
+        if menu is None:
+            raise ApiError("That role menu doesn't exist any more.", 404)
+        return menu
+
+    def _text_channel(self, raw):
+        channel = self.bot.get_channel(int(raw)) if str(raw).isdigit() else None
+        if not isinstance(channel, discord.TextChannel):
+            raise ApiError("Pick a text channel.")
+        return channel
+
+    async def reactions_get(self, request):
+        await self.need(request, "reactions")
+        cog, mod = self._reactions()
+        auto = []
+        for d in cog.auto.values():
+            ch = self.bot.get_channel(int(d["channel_id"]))
+            auto.append({**self._serial(d), "channel_name": ch.name if ch else None})
+        return web.json_response({"menus": [self._menu_out(m) for m in cog.menus.values()], "auto": auto, "modes": mod.MODES})
+
+    async def _apply_roles(self, cog, mod, menu, message, wanted):
+        """Make a menu's roles match the list from the dashboard: [{emoji, role_id}]."""
+        if not isinstance(wanted, list) or len(wanted) > mod.MAX_ROLES:
+            raise ApiError(f"A menu can have up to {mod.MAX_ROLES} roles.")
+        guild = message.guild
+        keys = []
+        for w in wanted:
+            emoji = cog.resolve_emoji(guild, (w or {}).get("emoji"))
+            keys.append(mod.emoji_key(emoji))
+        if len(set(keys)) != len(keys):
+            raise ApiError("Each role needs a different emoji.")
+        for r in list(menu["roles"]):
+            if r["key"] not in keys:
+                menu = await cog.remove_role(menu, r["emoji"])
+        for w in wanted:
+            role = guild.get_role(int(w["role_id"])) if str(w.get("role_id", "")).isdigit() else None
+            if role is None:
+                raise ApiError("Pick a role for every emoji.")
+            current = next((r for r in menu["roles"] if r["key"] == mod.emoji_key(cog.resolve_emoji(guild, w["emoji"]))), None)
+            if current is None or current["role_id"] != str(role.id):
+                menu = await cog.add_role(message, w["emoji"], role)
+        # Keep the dashboard's order.
+        order = {k: i for i, k in enumerate(keys)}
+        menu["roles"].sort(key=lambda r: order.get(r["key"], 99))
+        await cog.save_menu(menu)
+        await cog.refresh_embed(menu, message)
+        return menu
+
+    async def reactions_menu_create(self, request):
+        """Post a new menu in a channel, or turn an existing message (by link) into one."""
+        await self.need(request, "reactions")
+        cog, mod = self._reactions()
+        body = await request.json()
+        mode = str(body.get("mode") or "normal")
+
+        async def go():
+            link = str(body.get("message_link") or "").strip()
+            if link:
+                m = re.search(r"channels/\d+/(\d+)/(\d+)", link)
+                if not m:
+                    raise ApiError("Paste the message link (right-click the message > Copy Message Link).")
+                message = await cog.fetch_message(int(m.group(1)), int(m.group(2)))
+                if message.id in cog.menus:
+                    raise ApiError("That message is already a role menu.")
+                menu = await cog.attach_menu(message)
+                await cog.save_menu(menu)
+            else:
+                channel = self._text_channel(body.get("channel_id"))
+                menu = await cog.post_menu(channel, str(body.get("title") or "").strip()[:256], str(body.get("description") or "").strip()[:3000], mode)
+                message = await cog.fetch_message(menu["channel_id"], menu["message_id"])
+            menu = await cog.set_mode(menu, mode)
+            try:
+                menu = await self._apply_roles(cog, mod, menu, message, body.get("roles") or [])
+            except (ApiError, mod.ReactionError, discord.HTTPException):
+                if not body.get("message_link"):
+                    await cog.delete_menu(menu, delete_message=True)  # don't leave a half-made menu behind
+                else:
+                    await cog.delete_menu(menu)
+                raise
+            return menu
+
+        menu = await self._reaction_call(go(), mod)
+        return web.json_response({"ok": True, "menu": self._menu_out(menu)})
+
+    async def reactions_menu_put(self, request):
+        await self.need(request, "reactions")
+        cog, mod = self._reactions()
+        menu = self._menu_by_id(cog, request.match_info["message_id"])
+        body = await request.json()
+
+        async def go():
+            m = menu
+            message = await cog.fetch_message(m["channel_id"], m["message_id"])
+            if m.get("posted"):
+                if "title" in body:
+                    m["title"] = str(body["title"] or "").strip()[:256] or "Pick your roles"
+                if "description" in body:
+                    m["description"] = str(body["description"] or "").strip()[:3000]
+            if body.get("mode"):
+                m = await cog.set_mode(m, str(body["mode"]))
+            if "roles" in body:
+                m = await self._apply_roles(cog, mod, m, message, body["roles"])
+            else:
+                await cog.save_menu(m)
+                await cog.refresh_embed(m, message)
+            return m
+
+        menu = await self._reaction_call(go(), mod)
+        return web.json_response({"ok": True, "menu": self._menu_out(menu)})
+
+    async def reactions_menu_delete(self, request):
+        await self.need(request, "reactions")
+        cog, mod = self._reactions()
+        menu = self._menu_by_id(cog, request.match_info["message_id"])
+        await self._reaction_call(cog.delete_menu(menu, delete_message=request.query.get("delete_message") == "1"), mod)
+        return web.json_response({"ok": True})
+
+    async def reactions_auto_put(self, request):
+        await self.need(request, "reactions")
+        cog, mod = self._reactions()
+        channel = self._text_channel(request.match_info["channel_id"])
+        body = await request.json()
+        emojis = body.get("emojis") or []
+        if isinstance(emojis, str):
+            emojis = emojis.split()
+        doc = await self._reaction_call(cog.set_auto(channel, [str(e) for e in emojis], bool(body.get("include_bots"))), mod)
+        return web.json_response({"ok": True, "auto": {**self._serial(doc), "channel_name": channel.name}})
+
+    async def reactions_auto_delete(self, request):
+        await self.need(request, "reactions")
+        cog, mod = self._reactions()
+        await self._reaction_call(cog.remove_auto(request.match_info["channel_id"]), mod)
         return web.json_response({"ok": True})

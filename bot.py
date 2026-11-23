@@ -38,6 +38,7 @@ from core.clients import ApiClient, JSONClient, MongoDBClient, PluginDatabaseCli
 from core.config import ConfigManager
 from core.models import (
     DMDisabled,
+    DummyMessage,
     HostingMethod,
     InvalidConfigError,
     PermissionLevel,
@@ -1368,6 +1369,30 @@ class ModmailBot(commands.Bot):
 
         return [ctx]
 
+    async def run_as_bot(self, thread, text, source_message, *, cls=commands.Context):
+        """Run a snippet, alias or command in a thread's channel as the bot (like an autotrigger)."""
+        if thread.channel is None:
+            return
+        message = DummyMessage(copy.copy(source_message))
+        message.channel = thread.channel
+        message.guild = thread.channel.guild
+        prefix = self.prefix
+        message.content = text if text.startswith(prefix) else prefix + text
+        message.author = thread.recipient  # get_contexts ignores messages from the bot itself
+        ctxs = await self.get_contexts(message, cls=cls)
+        message.author = self.modmail_guild.me
+        for ctx in ctxs:
+            if not ctx.command:
+                logger.warning("Nothing called %r to run in the new ticket.", text)
+                continue
+            ctx.thread = thread
+            old_checks = copy.copy(ctx.command.checks)
+            ctx.command.checks = [checks.has_permissions(PermissionLevel.INVALID)]
+            try:
+                await self.invoke(ctx)
+            finally:
+                ctx.command.checks = old_checks
+
     async def trigger_auto_triggers(self, message, channel, *, cls=commands.Context):
         message.author = self.modmail_guild.me
         message.channel = channel
@@ -1768,6 +1793,17 @@ class ModmailBot(commands.Bot):
 
         ctx = await self.get_context(message)
         await ctx.invoke(self.get_command("contact"), users=[member], manual_trigger=False)
+
+        # Optionally greet them in the new ticket with a snippet, alias or command.
+        command_text = (self.config.get("react_to_contact_command") or "").strip()
+        if command_text and not existing_thread:
+            thread = await self.threads.find(recipient=member)
+            if thread is not None:
+                try:
+                    await thread.wait_until_ready()
+                    await self.run_as_bot(thread, command_text, message)
+                except Exception:
+                    logger.warning("react_to_contact_command %r failed.", command_text, exc_info=True)
 
     async def on_raw_reaction_add(self, payload):
         await asyncio.gather(

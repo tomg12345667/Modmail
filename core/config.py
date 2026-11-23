@@ -122,6 +122,7 @@ class ConfigManager:
         # react to contact
         "react_to_contact_message": None,
         "react_to_contact_emoji": "\N{WHITE HEAVY CHECK MARK}",
+        "react_to_contact_command": None,
         # confirm thread creation
         "confirm_thread_creation": False,
         "confirm_thread_creation_title": "Confirm thread creation",

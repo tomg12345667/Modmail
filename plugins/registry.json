@@ -151,5 +151,14 @@
         "title": "Message Commands",
         "icon_url": "https://github.com/tomg12345667.png",
         "thumbnail_url": "https://github.com/tomg12345667.png"
+    },
+    "reactions": {
+        "repository": "tomg12345667/Modmail",
+        "branch": "master",
+        "description": "Reaction roles (react to get a role, with normal, one-at-a-time and keep modes) and auto reactions (the bot reacts to every message in a channel). Manage both from the dashboard too.",
+        "bot_version": "4.0.0",
+        "title": "Reaction Roles & Auto Reactions",
+        "icon_url": "https://github.com/tomg12345667.png",
+        "thumbnail_url": "https://github.com/tomg12345667.png"
     }
 }

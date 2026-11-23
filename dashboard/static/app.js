@@ -147,6 +147,7 @@ const SECTIONS = [
   { id: "autotriggers", label: "Autotriggers", cap: "autotriggers" },
   { id: "msgcmd", label: "Message commands", cap: "msgcmd" },
   { id: "verification", label: "Verification", cap: "verification" },
+  { id: "reactions", label: "Reactions", cap: "reactions" },
   { group: "Staff and safety" },
   { id: "permissions", label: "Staff access", cap: "permissions" },
   { id: "blocks", label: "Blocked users", cap: "blocks" },
@@ -794,6 +795,121 @@ VIEWS.msgcmd = async (el) => {
   }
   if (!cmds.length) list.append(h("li", { class: "empty", text: "No message commands yet. Create one to send a message with blanks filled in." }));
   fill(el, pageHead("Message commands", "Your own commands that ask for a few details, then send a message.", h("button", { class: "btn primary", text: "New command", onclick: () => open(null) })), editor, list);
+};
+
+/* ---- reactions plugin: reaction roles + auto reactions --------------- */
+// Shows a custom server emoji (<:name:id>) as its picture; normal emojis as text.
+function emojiNode(text) {
+  const m = /^<(a?):([\w~]+):(\d+)>$/.exec(text || "");
+  if (!m) return h("span", { class: "emo-text", text: text || "?" });
+  return h("img", { class: "emo", alt: `:${m[2]}:`, title: `:${m[2]}:`, src: `https://cdn.discordapp.com/emojis/${m[3]}.${m[1] ? "gif" : "png"}?size=48`,
+    onerror: (e) => e.target.replaceWith(h("span", { class: "emo-name", text: `:${m[2]}:` })) });
+}
+// What to put back in an emoji box: custom emojis as :name:, which is easier to read and edit.
+const emojiInputText = (text) => { const m = /^<a?:([\w~]+):\d+>$/.exec(text || ""); return m ? `:${m[1]}:` : (text || ""); };
+
+VIEWS.reactions = async (el) => {
+  const [data, g] = await Promise.all([api("GET", "reactions"), guild()]);
+  const main = mainGuild(g);
+  const emojiList = h("datalist", { id: "server-emojis" }, ...(main.emojis || []).map((e) => h("option", { value: `:${e.name}:` })));
+  const emojiInput = (value) => h("input", { class: "emoji-in", value: emojiInputText(value), list: "server-emojis", placeholder: "🎮 or :name:", "aria-label": "Emoji" });
+
+  /* Role menus */
+  const editor = h("div", { class: "panel", hidden: true });
+  const openMenu = (menu) => {
+    const isNew = !menu;
+    const posted = isNew || menu.posted;
+    const source = h("select", {}, h("option", { value: "post", text: "Post a new message" }), h("option", { value: "link", text: "Use a message that's already posted" }));
+    const channel = channelSelect(main.channels, isNew ? "" : menu.channel_id, "Pick a channel");
+    const link = h("input", { placeholder: "https://discord.com/channels/…", "aria-label": "Message link" });
+    const title = h("input", { value: isNew ? "Pick your roles" : menu.title || "", maxlength: 256 });
+    const desc = h("textarea", { value: isNew ? "React below to get a role." : menu.description || "", maxlength: 3000 });
+    const mode = h("select", {}, ...Object.entries(data.modes).map(([k, v]) => h("option", { value: k, text: `${humanize(k)}: ${v}` })));
+    mode.value = isNew ? "normal" : menu.mode || "normal";
+    const rows = h("div", { class: "rr-rows" });
+    const addRow = (emoji, roleId) => {
+      const row = h("div", { class: "rr-row" }, emojiInput(emoji), roleSelect(main.roles, roleId, "Pick a role"),
+        h("button", { class: "btn quiet danger", text: "Remove", onclick: () => row.remove() }));
+      rows.append(row);
+    };
+    (isNew ? [["", ""]] : menu.roles.map((r) => [r.emoji, r.role_id])).forEach(([e, r]) => addRow(e, r));
+    const postFields = h("div", {}, field("Channel", channel), field("Title", title), field("Message", desc, "The bot adds the list of roles under this."));
+    const linkFields = h("div", { hidden: true }, field("Message link", link, "In Discord, right-click the message, then Copy Message Link. The message isn't changed; the bot just adds the reactions."));
+    source.onchange = () => { postFields.hidden = source.value !== "post"; linkFields.hidden = source.value === "post"; };
+    const save = h("button", { class: "btn primary", text: isNew ? "Create role menu" : "Save changes" });
+    save.onclick = () => busy(save, async () => {
+      const roles = [...rows.querySelectorAll(".rr-row")].map((r) => ({ emoji: r.querySelector("input").value.trim(), role_id: r.querySelector("select").value }))
+        .filter((r) => r.emoji || r.role_id);
+      if (!roles.length) throw new Error("Add at least one role.");
+      if (roles.some((r) => !r.emoji || !r.role_id)) throw new Error("Every row needs an emoji and a role.");
+      if (isNew) {
+        const body = { mode: mode.value, roles };
+        if (source.value === "post") { if (!channel.value) throw new Error("Pick a channel."); Object.assign(body, { channel_id: channel.value, title: title.value, description: desc.value }); }
+        else { if (!link.value.trim()) throw new Error("Paste the message link."); body.message_link = link.value.trim(); }
+        await api("POST", "reactions/menus", body);
+        toast("Role menu created.");
+      } else {
+        await api("PUT", `reactions/menus/${menu.message_id}`, { mode: mode.value, roles, ...(posted ? { title: title.value, description: desc.value } : {}) });
+        toast("Saved the role menu.");
+      }
+      route();
+    });
+    fill(editor, h("h3", { text: isNew ? "New role menu" : `Edit ${menu.title || "role menu"}` }),
+      isNew ? field("Message", source) : null,
+      isNew ? [postFields, linkFields] : posted ? [field("Title", title), field("Message", desc)] : h("p", { class: "muted small", text: "This menu uses a message someone posted, so only the roles can be changed here." }),
+      field("How it works", mode),
+      h("div", { class: "field" }, h("label", { text: "Roles" }), rows,
+        h("button", { class: "btn quiet", text: "Add a role", onclick: () => { if (rows.children.length >= 20) return toast("A message can have at most 20 reactions.", true); addRow("", ""); } })),
+      h("p", { class: "muted small", text: "The bot's role must be above these roles (Server Settings > Roles), and it needs Manage Roles." }),
+      h("div", { class: "row" }, save, h("button", { class: "btn quiet", text: "Cancel", onclick: () => { editor.hidden = true; } })));
+    editor.hidden = false;
+    editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const menuList = h("ul", { class: "list" });
+  for (const m of data.menus) {
+    menuList.append(h("li", {}, h("div", { class: "main" },
+      h("div", { class: "title", text: m.title || "Role menu" }),
+      h("div", { class: "sub", text: `#${m.channel_name || "deleted channel"} · ${humanize(m.mode || "normal")}` }),
+      h("div", { class: "rr-pairs" }, ...m.roles.map((r) => h("span", { class: "chip" }, emojiNode(r.emoji), h("span", { text: "@" + (r.role_name || "deleted role") }))))),
+      h("div", { class: "actions" },
+        h("a", { class: "btn quiet", href: m.link, target: "_blank", rel: "noopener", text: "Open in Discord" }),
+        h("button", { class: "btn quiet", text: "Edit", onclick: () => openMenu(m) }),
+        h("button", { class: "btn quiet danger", text: "Delete", onclick: async (e) => {
+          if (!confirmDo(m.posted ? "Delete this role menu and its message? Members keep their roles." : "Stop this message giving roles? Members keep their roles.")) return;
+          await busy(e.target, async () => { await api("DELETE", `reactions/menus/${m.message_id}?delete_message=1`); toast("Role menu deleted."); route(); });
+        } }))));
+  }
+  if (!data.menus.length) menuList.append(h("li", { class: "empty", text: "No role menus yet. Create one so members can pick their own roles." }));
+
+  /* Auto reactions */
+  const autoRow = (a) => {
+    const channel = channelSelect(main.channels, a ? a.channel_id : "", "Pick a channel");
+    channel.disabled = !!a;
+    const emojis = h("input", { value: a ? a.emojis.map(emojiInputText).join(" ") : "", list: "server-emojis", placeholder: "👍 👎 or :name:", "aria-label": "Emojis" });
+    let bots = a ? !!a.include_bots : false;
+    const save = h("button", { class: "btn" + (a ? "" : " primary"), text: a ? "Save" : "Turn on" });
+    save.onclick = () => busy(save, async () => {
+      if (!channel.value) throw new Error("Pick a channel.");
+      await api("PUT", `reactions/auto/${channel.value}`, { emojis: emojis.value.trim().split(/\s+/).filter(Boolean), include_bots: bots });
+      toast(a ? "Saved." : "Auto reactions are on."); route();
+    });
+    const remove = a ? h("button", { class: "btn quiet danger", text: "Turn off", onclick: async (e) => {
+      await busy(e.target, async () => { await api("DELETE", `reactions/auto/${a.channel_id}`); toast(`No more auto reactions in #${a.channel_name}.`); route(); });
+    } }) : null;
+    return h("li", { class: "auto-li" }, h("div", { class: "main auto-row" }, channel, h("div", { class: "grow" }, emojis),
+      h("label", { class: "inline" }, switchEl(bots, (e) => { bots = e.target.checked; }, "React to bots too"), h("span", { text: "Bots too" })),
+      a ? h("span", { class: "rr-preview" }, ...a.emojis.map(emojiNode)) : null),
+      h("div", { class: "actions" }, save, remove));
+  };
+  const autoList = h("ul", { class: "list" }, ...data.auto.map(autoRow), autoRow(null));
+
+  fill(el, pageHead("Reactions", "Let members pick roles by reacting, and have the bot react to new messages in a channel.",
+      h("button", { class: "btn primary", text: "New role menu", onclick: () => openMenu(null) })),
+    emojiList,
+    h("h3", { class: "mt", text: "Reaction roles" }), editor, menuList,
+    h("h3", { class: "mt", text: "Auto reactions" }),
+    h("p", { class: "muted small", text: "The bot reacts to every new message in these channels, for example 👍 👎 in #suggestions." }),
+    autoList);
 };
 
 /* ------------------------------------------------------------------ */

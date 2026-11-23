@@ -184,7 +184,7 @@ details summary { cursor: pointer; font-weight: 600; }
 
 /* ---------- small screens ---------- */
 @media (max-width: 860px) {
-  .shell { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
+  .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
   .rail { flex-direction: row; padding: 10px 16px; overflow-x: auto; }
   .rail .line[aria-current="true"]::before { left: 10px; top: auto; bottom: -10px; width: 28px; height: 4px; border-radius: 4px 4px 0 0; }
   .rail .me { margin: 0 0 0 auto; display: flex; gap: 8px; align-items: center; }
@@ -201,3 +201,24 @@ details summary { cursor: pointer; font-weight: 600; }
   table .hide-sm { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* Reactions page */
+.emo { width: 22px; height: 22px; vertical-align: middle; object-fit: contain; }
+.emo-text { font-size: 1.15rem; line-height: 1; }
+.rr-rows { display: grid; gap: 8px; margin-bottom: 8px; }
+.rr-row { display: grid; grid-template-columns: 9rem minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.emoji-in { font-size: 1.05rem; }
+.rr-pairs { margin-top: 6px; }
+.rr-preview { display: inline-flex; gap: 4px; }
+.auto-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.auto-row > select { flex: 0 1 15rem; min-width: 0; }
+.auto-row > .grow { flex: 1 1 10rem; min-width: 0; }
+.auto-row > .grow > input { width: 100%; }
+.emo-name { font-size: .8rem; color: var(--muted); }
+label.inline { display: inline-flex; align-items: center; gap: 8px; font-size: .9rem; }
+@media (max-width: 560px) {
+  .rr-row { grid-template-columns: 6.5rem minmax(0, 1fr); }
+  .rr-row > button { grid-column: 1 / -1; justify-self: start; }
+  .list > li.auto-li { flex-wrap: wrap; }
+  .list > li.auto-li > .main { flex-basis: 100%; }
+}

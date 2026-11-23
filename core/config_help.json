@@ -778,6 +778,19 @@
       "See also: `react_to_contact_message \u2705`"
     ]
   },
+  "react_to_contact_command": {
+    "default": "Nothing",
+    "description": "A snippet, alias or command to run in the new ticket when someone opens it by reacting to `react_to_contact_message`. It runs as the bot, so a snippet is sent to the member straight away.",
+    "examples": [
+      "`{prefix}config set react_to_contact_command welcome` (a snippet or alias called welcome)",
+      "`{prefix}config set react_to_contact_command reply Thanks for reaching out! Staff will be with you shortly.`",
+      "`{prefix}config del react_to_contact_command` (stop running anything)"
+    ],
+    "notes": [
+      "Several steps can be run in order with an alias, e.g. `{prefix}alias add reactopen \"welcome && tag New\"`.",
+      "See also: `react_to_contact_message`, `react_to_contact_emoji`"
+    ]
+  },
   "transfer_reactions": {
     "default": "Yes",
     "description": "Transfer users reactions to mods and vice versa",
