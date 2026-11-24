@@ -186,6 +186,7 @@ class ConfigManager:
         "command_permissions": {},
         "level_permissions": {},
         "override_command_level": {},
+        "permission_groups": {},
         # threads
         "snippets": {},
         "notification_squad": {},

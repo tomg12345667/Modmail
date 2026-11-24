@@ -24,7 +24,9 @@ from typing import Optional
 
 import discord
 from aiohttp import web
+from discord.ext import commands as commands_ext
 
+from core import permgroups
 from core.checks import check_permissions
 from core.models import DMDisabled, InvalidConfigError, PermissionLevel, getLogger
 
@@ -178,6 +180,9 @@ class DashboardAPI:
         r.add_get("/api/permissions", self.perms_get)
         r.add_post("/api/permissions", self.perms_post)
         r.add_post("/api/overrides", self.overrides_post)
+        r.add_post("/api/permgroups", self.permgroups_post)
+        r.add_put("/api/permgroups/{name}", self.permgroups_put)
+        r.add_delete("/api/permgroups/{name}", self.permgroups_delete)
         for kind in ("snippets", "aliases", "autotriggers"):
             r.add_get(f"/api/{kind}", self.kv_get)
             r.add_put(f"/api/{kind}/{{name}}", self.kv_put)
@@ -592,7 +597,13 @@ class DashboardAPI:
         commands = {name: [self._name_for(x) for x in ids] for name, ids in c["command_permissions"].items() if ids}
         overrides = dict(c["override_command_level"])
         all_cmds = sorted({cmd.qualified_name for cmd in self.bot.walk_commands()})
-        return web.json_response({"levels": levels, "commands": commands, "overrides": overrides, "all_commands": all_cmds})
+        groups = [{**g, "members": [self._name_for(m) for m in g["members"]]} for g in permgroups.get_groups(self.bot).values()]
+        grantable = [
+            {"name": n, "level": self.bot.command_perm(n).name, "has_sub": isinstance(self.bot.get_command(n), commands_ext.Group)}
+            for n in all_cmds if self.bot.command_perm(n) is not PermissionLevel.OWNER
+        ]
+        return web.json_response({"levels": levels, "commands": commands, "overrides": overrides, "all_commands": all_cmds,
+                                  "groups": groups, "grantable": grantable})
 
     async def perms_post(self, request):
         await self.need(request, "permissions")
@@ -633,6 +644,56 @@ class DashboardAPI:
                 raise ApiError("Unknown level.")
             c["override_command_level"][cmd.qualified_name] = lvl.name
         await c.update()
+        return web.json_response({"ok": True})
+
+    # ---- permission groups -------------------------------------------- #
+    async def _group_call(self, coro):
+        try:
+            return await coro
+        except permgroups.GroupError as e:
+            raise ApiError(str(e))
+
+    def _group_out(self, group):
+        return {**group, "members": [self._name_for(m) for m in group["members"]]}
+
+    async def permgroups_post(self, request):
+        await self.need(request, "permissions")
+        body = await request.json()
+        group = await self._group_call(permgroups.create(self.bot, str(body.get("name", ""))))
+        return web.json_response({"ok": True, "group": self._group_out(group)})
+
+    async def permgroups_put(self, request):
+        """Change a group: any of name, commands (list), members (list of role/user IDs)."""
+        await self.need(request, "permissions")
+        name = request.match_info["name"]
+        body = await request.json()
+
+        async def go():
+            group = permgroups.find(self.bot, name)
+            # Check everything before saving anything, so a bad command doesn't leave a half-saved group.
+            if "commands" in body:
+                cmds = body["commands"]
+                if not isinstance(cmds, list):
+                    raise permgroups.GroupError("Commands must be a list.")
+                [permgroups.normalize_command(self.bot, c) for c in cmds]
+            if "members" in body and not isinstance(body["members"], list):
+                raise permgroups.GroupError("Members must be a list.")
+            current = group["name"]
+            if body.get("name") and body["name"].strip() != current:
+                group = await permgroups.rename(self.bot, current, body["name"])
+                current = group["name"]
+            if "commands" in body:
+                group = await permgroups.set_commands(self.bot, current, body["commands"])
+            if "members" in body:
+                group = await permgroups.set_members(self.bot, current, [str(m) for m in body["members"]])
+            return group
+
+        group = await self._group_call(go())
+        return web.json_response({"ok": True, "group": self._group_out(group)})
+
+    async def permgroups_delete(self, request):
+        await self.need(request, "permissions")
+        await self._group_call(permgroups.delete(self.bot, request.match_info["name"]))
         return web.json_response({"ok": True})
 
     # ---- snippets / aliases / autotriggers ------------------------------ #

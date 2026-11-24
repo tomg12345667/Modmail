@@ -573,9 +573,47 @@ VIEWS.permissions = async (el) => {
   const newCmd = h("input", { list: "allcmds", placeholder: "Command, e.g. funclaim" });
   const newLvl = levelSel("administrator");
 
+  /* Permission groups: extra commands for a role or member, on top of their level. */
+  const grantOpts = h("datalist", { id: "grantcmds" }, ...p.grantable.flatMap((c) => [h("option", { value: c.name }), ...(c.has_sub ? [h("option", { value: `${c.name} *` })] : [])]));
+  const putGroup = async (name, body, msg) => { try { await api("PUT", `permgroups/${encodeURIComponent(name)}`, body); toast(msg); route(); } catch (e) { toast(e.message, true); } };
+  const groupPanels = (p.groups || []).map((grp) => {
+    const memberIds = grp.members.map((m) => m.id);
+    const who = h("div", {}, ...grp.members.map((m) => h("span", { class: "chip" }, m.name,
+      h("button", { "aria-label": `Remove ${m.name}`, text: "×", onclick: () => putGroup(grp.name, { members: memberIds.filter((x) => x !== m.id) }, `Took ${grp.name} from ${m.name}.`) }))));
+    if (!grp.members.length) who.append(h("span", { class: "muted small", text: "Not given to anyone yet." }));
+    const sel = roleSelect(staff.roles, "", "Give to a role…");
+    sel.onchange = () => sel.value && putGroup(grp.name, { members: [...memberIds, sel.value] }, `Gave ${grp.name} to ${sel.selectedOptions[0].text}.`);
+    const pickerWrap = h("div", { hidden: true }, memberPicker((id, name) => putGroup(grp.name, { members: [...memberIds, id] }, `Gave ${grp.name} to ${name}.`), "Add"));
+    const cmdChips = h("div", {}, ...grp.commands.map((c) => h("span", { class: "chip mono" }, "?" + c,
+      h("button", { "aria-label": `Remove ${c}`, text: "×", onclick: () => putGroup(grp.name, { commands: grp.commands.filter((x) => x !== c) }, `Removed ${c} from ${grp.name}.`) }))));
+    if (!grp.commands.length) cmdChips.append(h("span", { class: "muted small", text: "No commands yet." }));
+    const add = h("input", { list: "grantcmds", placeholder: "reply, note, close, snippet *" });
+    const addCmds = () => { const list = add.value.split(",").map((x) => x.trim()).filter(Boolean); if (list.length) putGroup(grp.name, { commands: [...grp.commands, ...list] }, `Added to ${grp.name}.`); };
+    add.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addCmds(); } };
+    return h("div", { class: "panel" },
+      h("div", { class: "row" }, h("h3", { class: "grow", text: grp.name }),
+        h("button", { class: "btn quiet", text: "Rename", onclick: () => { const n = prompt("New name for this group", grp.name); if (n && n.trim() && n.trim() !== grp.name) putGroup(grp.name, { name: n.trim() }, `Renamed to ${n.trim()}.`); } }),
+        h("button", { class: "btn quiet danger", text: "Delete", onclick: async (e) => { if (!confirmDo(`Delete ${grp.name}? Everyone in it loses these commands (but keeps their normal level).`)) return;
+          await busy(e.target, async () => { await api("DELETE", `permgroups/${encodeURIComponent(grp.name)}`); toast(`Deleted ${grp.name}.`); route(); }); } })),
+      h("p", { class: "muted small", text: "Given to" }), who,
+      h("div", { class: "row mt" }, h("div", { class: "grow" }, sel), h("button", { class: "btn quiet", text: "Add a member", onclick: () => { pickerWrap.hidden = !pickerWrap.hidden; } })), pickerWrap,
+      h("p", { class: "muted small mt", text: "Commands" }), cmdChips,
+      h("div", { class: "row mt" }, h("div", { class: "grow" }, add), h("button", { class: "btn", text: "Add commands", onclick: addCmds })));
+  });
+  const newGroup = h("input", { placeholder: "Group name, e.g. Trainee", maxlength: 32 });
+  const createGroup = h("button", { class: "btn primary", text: "Create group" });
+  createGroup.onclick = () => busy(createGroup, async () => {
+    if (!newGroup.value.trim()) throw new Error("Name the group.");
+    await api("POST", "permgroups", { name: newGroup.value.trim() }); toast(`Created ${newGroup.value.trim()}. Now add commands and give it to a role.`); route();
+  });
+
   fill(el, pageHead("Staff access", `Who counts as staff, using roles from ${staff.name}. Each level can do everything the levels below it can.`),
     h("div", { class: "note", text: "People with Discord's Administrator permission in the staff server are treated as Administrators automatically. Bot owners in OWNERS always have full access." }),
     ...blocks,
+    h("h2", { text: "Permission groups" }),
+    h("p", { class: "muted", text: "Give a role or member a few extra commands without changing their level. For example, a Trainee group that can only reply, add notes and close tickets. Owner-only commands can't be put in a group. Add “ *” after a command to include all its subcommands." }),
+    grantOpts, ...groupPanels,
+    h("div", { class: "row" }, h("div", { class: "grow" }, newGroup), createGroup),
     h("h2", { text: "Command levels" }), h("p", { class: "muted", text: "Make a single command need a higher or lower level than normal." }), cmds, oTable,
     h("div", { class: "row mt" }, h("div", { class: "grow" }, newCmd), newLvl,
       h("button", { class: "btn primary", text: "Set level", onclick: () => newCmd.value.trim() && setOverride(newCmd.value.trim(), newLvl.value, `${newCmd.value.trim()} now needs ${humanize(newLvl.value)}.`) })));

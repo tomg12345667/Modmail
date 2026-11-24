@@ -23,7 +23,7 @@ from discord.ext.commands.view import StringView
 from aiohttp import ClientResponseError
 from packaging.version import Version
 
-from core import checks, utils
+from core import checks, permgroups, utils
 from core.changelog import Changelog
 from core.models import (
     HostingMethod,
@@ -1829,6 +1829,149 @@ class Utility(commands.Cog):
 
         session = EmbedPaginatorSession(ctx, *embeds)
         return await session.run()
+
+    # ---- permission groups ---------------------------------------------- #
+    def _pg_who(self, ctx, member_id: str) -> str:
+        role = self.bot.modmail_guild.get_role(int(member_id)) if self.bot.modmail_guild else None
+        if role is not None:
+            return role.mention
+        return f"<@{member_id}>"
+
+    def _pg_embed(self, ctx, group: dict) -> discord.Embed:
+        embed = discord.Embed(title=f"Permission group: {group['name']}", color=self.bot.main_color)
+        cmds = " ".join(f"`{c}`" for c in group["commands"]) or "No commands yet."
+        who = " ".join(self._pg_who(ctx, m) for m in group["members"]) or "Nobody yet."
+        embed.add_field(name="Commands", value=utils.truncate(cmds, 1024), inline=False)
+        embed.add_field(name="Given to", value=utils.truncate(who, 1024), inline=False)
+        embed.set_footer(text="Groups add these commands on top of each person's normal level.")
+        return embed
+
+    async def _pg_error(self, ctx, text):
+        await ctx.send(embed=discord.Embed(title="Error", description=text, color=self.bot.error_color))
+
+    @commands.group(name="permgroup", aliases=["permgroups", "pg"], invoke_without_command=True)
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup(self, ctx, *, name: str = None):
+        """
+        Permission groups: give a role or member a set of commands, without changing their level.
+
+        For example, a Trainee group could use `reply`, `note` and `close` without being Supporters.
+        Owner-only commands can't be put in a group.
+
+        `{prefix}permgroup` lists every group, `{prefix}permgroup <name>` shows one.
+
+        **Examples:**
+        `{prefix}permgroup create Trainee`
+        `{prefix}permgroup add Trainee reply, note, close, snippet *`
+        `{prefix}permgroup give Trainee @Trainee`
+        """
+        if name:
+            try:
+                return await ctx.send(embed=self._pg_embed(ctx, permgroups.find(self.bot, name)))
+            except permgroups.GroupError as e:
+                return await self._pg_error(ctx, str(e))
+        groups = permgroups.get_groups(self.bot)
+        if not groups:
+            return await ctx.send(embed=discord.Embed(
+                title="Permission groups",
+                description=f"No groups yet. Start with `{self.bot.prefix}permgroup create Trainee`, then see `{self.bot.prefix}help permgroup`.",
+                color=self.bot.main_color))
+        embed = discord.Embed(title="Permission groups", color=self.bot.main_color)
+        for g in list(groups.values())[:25]:
+            who = " ".join(self._pg_who(ctx, m) for m in g["members"]) or "Nobody yet"
+            embed.add_field(name=g["name"], value=utils.truncate(f"{len(g['commands'])} commands · {who}", 1024), inline=False)
+        await ctx.send(embed=embed)
+
+    @permgroup.command(name="create")
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup_create(self, ctx, *, name: str):
+        """Make a new, empty permission group."""
+        try:
+            group = await permgroups.create(self.bot, name)
+        except permgroups.GroupError as e:
+            return await self._pg_error(ctx, str(e))
+        await ctx.send(embed=discord.Embed(
+            title=f"Created {group['name']}",
+            description=f"Now add commands: `{self.bot.prefix}permgroup add {group['name']} reply, note, close`\n"
+                        f"Then give it out: `{self.bot.prefix}permgroup give {group['name']} @Role`",
+            color=self.bot.main_color))
+
+    @permgroup.command(name="delete")
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup_delete(self, ctx, *, name: str):
+        """Delete a permission group. Its members lose the commands it gave them."""
+        try:
+            group = permgroups.find(self.bot, name)
+            await permgroups.delete(self.bot, name)
+        except permgroups.GroupError as e:
+            return await self._pg_error(ctx, str(e))
+        await ctx.send(embed=discord.Embed(description=f"Deleted the {group['name']} group.", color=self.bot.main_color))
+
+    @permgroup.command(name="rename")
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup_rename(self, ctx, name: str, *, new_name: str):
+        """Rename a group. Use quotes if the old name has spaces."""
+        try:
+            group = await permgroups.rename(self.bot, name, new_name)
+        except permgroups.GroupError as e:
+            return await self._pg_error(ctx, str(e))
+        await ctx.send(embed=self._pg_embed(ctx, group))
+
+    @permgroup.command(name="add")
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup_add(self, ctx, name: str, *, commands: str):
+        """
+        Add commands to a group. Separate several with commas.
+
+        End a command with ` *` to include all its subcommands.
+
+        **Example:**
+        `{prefix}permgroup add Trainee reply, note, close, snippet *`
+        """
+        try:
+            group = await permgroups.add_commands(self.bot, name, [c for c in commands.split(",") if c.strip()])
+        except permgroups.GroupError as e:
+            return await self._pg_error(ctx, str(e))
+        await ctx.send(embed=self._pg_embed(ctx, group))
+
+    @permgroup.command(name="remove")
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup_remove(self, ctx, name: str, *, commands: str):
+        """Take commands out of a group. Separate several with commas."""
+        try:
+            group = await permgroups.remove_commands(self.bot, name, [c for c in commands.split(",") if c.strip()])
+        except permgroups.GroupError as e:
+            return await self._pg_error(ctx, str(e))
+        await ctx.send(embed=self._pg_embed(ctx, group))
+
+    @permgroup.command(name="give")
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup_give(self, ctx, name: str, *, who: Union[discord.Role, utils.User]):
+        """
+        Give a group to a role or a member.
+
+        **Example:**
+        `{prefix}permgroup give Trainee @Trainee`
+        """
+        try:
+            group = permgroups.find(self.bot, name)
+            group = await permgroups.set_members(self.bot, name, [*group["members"], str(who.id)])
+        except permgroups.GroupError as e:
+            return await self._pg_error(ctx, str(e))
+        await ctx.send(embed=self._pg_embed(ctx, group))
+
+    @permgroup.command(name="take")
+    @checks.has_permissions(PermissionLevel.OWNER)
+    async def permgroup_take(self, ctx, name: str, *, who: Union[discord.Role, utils.User]):
+        """Take a group away from a role or a member."""
+        try:
+            group = permgroups.find(self.bot, name)
+            if str(who.id) not in group["members"]:
+                raise permgroups.GroupError(f"{getattr(who, 'mention', who)} isn't in {group['name']}.")
+            group = await permgroups.set_members(self.bot, name, [m for m in group["members"] if m != str(who.id)])
+        except permgroups.GroupError as e:
+            return await self._pg_error(ctx, str(e))
+        await ctx.send(embed=self._pg_embed(ctx, group))
 
     @commands.group(invoke_without_command=True)
     @checks.has_permissions(PermissionLevel.OWNER)

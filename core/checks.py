@@ -1,5 +1,6 @@
 from discord.ext import commands
 
+from core import permgroups
 from core.models import HostingMethod, PermissionLevel, getLogger
 
 logger = getLogger(__name__)
@@ -66,6 +67,12 @@ async def check_permissions(ctx, command_name) -> bool:
         if -1 in command_permissions[command_name] or any(
             str(check.id) in command_permissions[command_name] for check in checkables
         ):
+            return True
+
+    if permission_level is not PermissionLevel.OWNER:
+        # Permission groups hand extra commands to roles/members (never Owner-only ones).
+        groups = ctx.bot.config.get("permission_groups") or {}
+        if groups and permgroups.allows(groups, command_name, (c.id for c in checkables)):
             return True
 
     level_permissions = ctx.bot.config["level_permissions"]
