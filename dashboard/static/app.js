@@ -148,6 +148,7 @@ const SECTIONS = [
   { id: "msgcmd", label: "Message commands", cap: "msgcmd" },
   { id: "verification", label: "Verification", cap: "verification" },
   { id: "reactions", label: "Reactions", cap: "reactions" },
+  { id: "suggestions", label: "Suggestions", cap: ["suggestion_review", "suggestions"] },
   { group: "Staff and safety" },
   { id: "permissions", label: "Staff access", cap: "permissions" },
   { id: "blocks", label: "Blocked users", cap: "blocks" },
@@ -159,6 +160,7 @@ const can = (cap) => {
   const b = state.bot;
   if (!cap) return true;
   if (!b || !b.can) return false;
+  if (Array.isArray(cap)) return cap.some((c) => !!b.can[c]);
   if (cap === "_staff") return Object.values(b.can).some(Boolean);
   if (cap === "_shared") return (b.shared || 0) > 0;
   return !!b.can[cap];
@@ -948,6 +950,128 @@ VIEWS.reactions = async (el) => {
     h("h3", { class: "mt", text: "Auto reactions" }),
     h("p", { class: "muted small", text: "The bot reacts to every new message in these channels, for example 👍 👎 in #suggestions." }),
     autoList);
+};
+
+/* ---- suggestions plugin ---------------------------------------------- */
+VIEWS.suggestions = async (el) => {
+  const filter = state.arg && state.arg !== "all" ? state.arg : "";
+  const [d, g] = await Promise.all([api("GET", "suggestions" + (filter ? `?status=${filter}` : "")), guild()]);
+  const main = mainGuild(g);
+  const base = `#/${state.bot.id}/suggestions`;
+
+  /* Respond to suggestions */
+  const filters = h("nav", { class: "sg-filter", "aria-label": "Show suggestions" },
+    ...[["all", "All"], ...Object.entries(d.statuses)].map(([k, label]) =>
+      h("a", { href: `${base}/${k}`, class: (filter || "all") === k ? "on" : "", "aria-current": (filter || "all") === k ? "page" : null, text: label })));
+  const list = h("ul", { class: "list" });
+  for (const it of d.items) {
+    const respond = h("div", { class: "sg-respond", hidden: true });
+    const status = h("select", { "aria-label": "Status" }, ...Object.entries(d.statuses).map(([k, label]) => h("option", { value: k, text: label })));
+    status.value = it.status;
+    const reason = h("textarea", { placeholder: "Reason (optional, the member sees it)", value: it.reason || "", maxlength: 900, rows: 2 });
+    const save = h("button", { class: "btn primary", text: "Save" });
+    save.onclick = () => busy(save, async () => {
+      await api("POST", `suggestions/${it.number}/status`, { status: status.value, reason: reason.value });
+      toast(`Suggestion #${it.number} is now ${d.statuses[status.value].toLowerCase()}.`); route();
+    });
+    fill(respond, field("Status", status), field("Reason", reason), h("div", { class: "row" }, save, h("button", { class: "btn quiet", text: "Cancel", onclick: () => { respond.hidden = true; } })));
+    list.append(h("li", { class: "sg-item" },
+      h("div", { class: "main" },
+        h("div", { class: "title" }, h("span", { class: "sg-num", text: `#${it.number}` }), " ", it.title || "Suggestion"),
+        h("div", { class: "sub" }, h("span", { class: `sg-status s-${it.status}`, text: d.statuses[it.status] }),
+          ` ${it.author_name || "Unknown"} · ${new Date(it.created).toLocaleDateString()}`),
+        it.reason ? h("div", { class: "sub", text: `Reason: ${it.reason}` }) : null,
+        respond),
+      h("div", { class: "actions" },
+        it.link ? h("a", { class: "btn quiet", href: it.link, target: "_blank", rel: "noopener", text: "Open in Discord" }) : null,
+        h("button", { class: "btn", text: "Respond", onclick: () => { respond.hidden = !respond.hidden; if (!respond.hidden) status.focus(); } }),
+        h("button", { class: "btn quiet danger", text: "Delete", onclick: async (e) => {
+          if (!confirmDo(`Delete suggestion #${it.number} and its discussion thread?`)) return;
+          await busy(e.target, async () => { await api("DELETE", `suggestions/${it.number}`); toast(`Deleted suggestion #${it.number}.`); route(); });
+        } }))));
+  }
+  if (!d.items.length) list.append(h("li", { class: "empty", text: filter ? `No suggestions marked ${d.statuses[filter].toLowerCase()}.` : "No suggestions yet. Once members use the button, they show up here." }));
+
+  /* Settings (Administrators) */
+  let settingsPart = null;
+  if (d.can_settings) {
+    const s = d.settings;
+    const chan = channelSelect(main.channels, d.channel_id || "", "Pick a channel");
+    const moveBtn = h("button", { class: "btn primary", text: d.channel_id ? "Use this channel" : "Set up suggestions" });
+    moveBtn.onclick = () => busy(moveBtn, async () => {
+      if (!chan.value) throw new Error("Pick a channel.");
+      await api("POST", "suggestions/setup", { channel_id: chan.value }); toast("Suggestions are set up. The button is posted in that channel."); route();
+    });
+    const repost = h("button", { class: "btn", text: "Post the button again", disabled: !d.channel_id });
+    repost.onclick = () => busy(repost, async () => { await api("POST", "suggestions/panel", {}); toast("Posted the button again."); route(); });
+
+    const inputs = {};
+    const text = (k, multi) => (inputs[k] = h(multi ? "textarea" : "input", { value: s[k] ?? "", rows: multi ? 3 : null }));
+    const toggles = {};
+    const toggle = (k, label) => h("label", { class: "inline" }, switchEl(!!s[k], (e) => { toggles[k] = e.target.checked; }, label), h("span", { text: label }));
+    const saveSettings = h("button", { class: "btn primary", text: "Save settings" });
+    saveSettings.onclick = () => busy(saveSettings, async () => {
+      const body = { ...toggles };
+      for (const [k, input] of Object.entries(inputs)) if (String(input.value) !== String(s[k] ?? "")) body[k] = input.value;
+      if (!Object.keys(body).length) return toast("Nothing changed.");
+      await api("PUT", "suggestions/settings", body); toast("Saved the suggestion settings."); route();
+    });
+
+    // Form questions (Discord allows 5).
+    const qRows = h("div", { class: "q-rows" });
+    const addQ = (q, i) => {
+      const style = h("select", { "aria-label": "Answer size" }, h("option", { value: "short", text: "One line" }), h("option", { value: "long", text: "Paragraph" }));
+      style.value = q.style || "short";
+      const req = h("input", { type: "checkbox", checked: q.required !== false, "aria-label": "Required" });
+      const row = h("div", { class: "q-row" },
+        h("input", { class: "q-label", value: q.label || "", maxlength: 45, placeholder: "Question", "aria-label": "Question" }),
+        h("input", { class: "q-hint", value: q.placeholder || "", maxlength: 100, placeholder: "Hint shown in the box (optional)", "aria-label": "Hint" }),
+        style, h("label", { class: "inline q-req" }, req, h("span", { text: "Required" })),
+        h("button", { class: "btn quiet danger", text: "Remove", onclick: () => row.remove() }));
+      qRows.append(row);
+    };
+    d.questions.forEach(addQ);
+    const saveQs = h("button", { class: "btn primary", text: "Save questions" });
+    saveQs.onclick = () => busy(saveQs, async () => {
+      const questions = [...qRows.children].map((r) => ({ label: r.querySelector(".q-label").value.trim(), placeholder: r.querySelector(".q-hint").value.trim(),
+        style: r.querySelector("select").value, required: r.querySelector("input[type=checkbox]").checked }));
+      await api("PUT", "suggestions/settings", { questions }); toast("Saved the form's questions."); route();
+    });
+    const enabled = switchEl(d.enabled, async (e) => {
+      try { await api("PUT", "suggestions/settings", { enabled: e.target.checked }); toast(e.target.checked ? "Suggestions are open." : "Suggestions are closed. The button tells members so."); }
+      catch (err) { e.target.checked = !e.target.checked; toast(err.message, true); }
+    }, "Suggestions open");
+
+    settingsPart = [
+      h("h2", { class: "mt", text: "Settings" }),
+      h("div", { class: "panel" },
+        h("div", { class: "row" }, h("h3", { class: "grow", text: "Channel" }), h("label", { class: "inline" }, enabled, h("span", { text: "Open" }))),
+        h("p", { class: "muted small", text: "Suggestions are posted here, and the button goes at the bottom of it." }),
+        h("div", { class: "row" }, h("div", { class: "grow" }, chan), moveBtn),
+        h("div", { class: "row mt" }, repost, d.panel_link ? h("a", { class: "btn quiet", href: d.panel_link, target: "_blank", rel: "noopener", text: "Open the button message" }) : null)),
+      h("div", { class: "panel" }, h("h3", { text: "Wording" }),
+        field("Button message title", text("panel_title")),
+        field("Button message text", text("panel_text", true), "{server} is your server's name."),
+        field("Button label", text("button_label")),
+        field("Form title", text("form_title"), "Up to 45 characters."),
+        field("After submitting", text("thanks"), "Only the member sees this. {channel} links the suggestions channel."),
+        field("DM when staff respond", text("dm_text", true), "{number}, {server} and {status}, e.g. “was approved”. The reason is added below it."),
+        h("h3", { class: "mt", text: "Options" }),
+        h("div", { class: "sg-opts" }, toggle("votes", "Vote reactions"), toggle("threads", "Discussion thread"), toggle("dm_updates", "DM members updates"),
+          toggle("anonymous", "Hide who suggested"), toggle("sticky_panel", "Keep the button at the bottom")),
+        h("div", { class: "sg-grid" }, field("Vote yes", text("vote_up")), field("Vote no", text("vote_down")), field("Cooldown (minutes)", text("cooldown"))),
+        saveSettings),
+      h("div", { class: "panel" }, h("h3", { text: "Form questions" }),
+        h("p", { class: "muted small", text: "What members fill in. The first answer becomes the suggestion's title. Discord allows up to 5 questions of 45 characters each." }),
+        qRows,
+        h("div", { class: "row" }, h("button", { class: "btn quiet", text: "Add a question", onclick: () => { if (qRows.children.length >= 5) return toast("Discord forms can have up to 5 questions.", true); addQ({ style: "long", required: false }); } }), saveQs)),
+    ];
+  }
+
+  const notSetUp = d.can_settings && !d.channel_id;
+  fill(el, pageHead("Suggestions", "Members press a button to suggest ideas, everyone votes, and staff respond here."),
+    notSetUp ? h("div", { class: "note", text: "Pick a channel under Settings to post the suggestion button." }) : null,
+    filters, list, settingsPart);
 };
 
 /* ------------------------------------------------------------------ */

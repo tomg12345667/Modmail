@@ -160,5 +160,14 @@
         "title": "Reaction Roles & Auto Reactions",
         "icon_url": "https://github.com/tomg12345667.png",
         "thumbnail_url": "https://github.com/tomg12345667.png"
+    },
+    "suggestions": {
+        "repository": "tomg12345667/Modmail",
+        "branch": "master",
+        "description": "A button members press to suggest ideas through a short form. Everyone votes, each suggestion gets a discussion thread, and staff approve, deny or mark them done (the member gets a DM). All wording and the form's questions can be changed, also from the dashboard.",
+        "bot_version": "4.0.0",
+        "title": "Suggestions",
+        "icon_url": "https://github.com/tomg12345667.png",
+        "thumbnail_url": "https://github.com/tomg12345667.png"
     }
 }

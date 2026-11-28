@@ -48,6 +48,8 @@ CAPABILITIES = {
     "verification": "verification setup",
     "msgcmd": "msgcmd create",
     "reactions": "rr add",
+    "suggestions": "suggestions setup",
+    "suggestion_review": "suggestion approve",
 }
 
 MENU_KEYS = ("thread_creation_menu_options", "thread_creation_menu_submenus")
@@ -208,6 +210,12 @@ class DashboardAPI:
         r.add_get("/api/msgcmd", self.msgcmd_get)
         r.add_put("/api/msgcmd/{name}", self.msgcmd_put)
         r.add_delete("/api/msgcmd/{name}", self.msgcmd_delete)
+        r.add_get("/api/suggestions", self.suggestions_get)
+        r.add_put("/api/suggestions/settings", self.suggestions_settings_put)
+        r.add_post("/api/suggestions/setup", self.suggestions_setup_post)
+        r.add_post("/api/suggestions/panel", self.suggestions_panel_post)
+        r.add_post("/api/suggestions/{number}/status", self.suggestions_status_post)
+        r.add_delete("/api/suggestions/{number}", self.suggestions_delete)
         r.add_get("/api/reactions", self.reactions_get)
         r.add_post("/api/reactions/menus", self.reactions_menu_create)
         r.add_put("/api/reactions/menus/{message_id}", self.reactions_menu_put)
@@ -1232,4 +1240,89 @@ class DashboardAPI:
         await self.need(request, "reactions")
         cog, mod = self._reactions()
         await self._reaction_call(cog.remove_auto(request.match_info["channel_id"]), mod)
+        return web.json_response({"ok": True})
+
+    # ---- suggestions plugin --------------------------------------------- #
+    def _suggestions(self):
+        cog = self.bot.get_cog("Suggestions")
+        if cog is None:
+            raise ApiError("The suggestions plugin isn't installed on this bot.", 404)
+        return cog, sys.modules[type(cog).__module__]
+
+    async def _sg_call(self, coro, mod):
+        try:
+            return await coro
+        except mod.SuggestionError as e:
+            raise ApiError(str(e))
+        except discord.HTTPException as e:
+            raise ApiError(f"Discord refused: {e.text or e}")
+
+    def _sg_out(self, cog, doc):
+        return {**self._serial(doc), "link": cog.link(doc) if doc.get("message_id") else None,
+                "title": (doc.get("answers") or [{}])[0].get("value", "")}
+
+    async def suggestions_get(self, request):
+        uid = request["uid"]
+        can_settings = await self.allowed(uid, "suggestions")
+        if not (can_settings or await self.allowed(uid, "suggestion_review")):
+            raise ApiError("You don't have permission for this.", 403)
+        cog, mod = self._suggestions()
+        status = request.query.get("status") or None
+        items = [self._sg_out(cog, d) for d in await cog.recent(status if status in mod.STATUSES else None, 100)]
+        out = {
+            "items": items,
+            "statuses": {k: v["label"] for k, v in mod.STATUSES.items()},
+            "can_settings": can_settings,
+            "enabled": cog.settings["enabled"],
+            "channel_id": cog.settings.get("channel_id"),
+        }
+        if can_settings:
+            s = cog.settings
+            out["settings"] = {k: (round(s[k] / 60, 1) if k == "cooldown" else s[k]) for k in mod.SETTING_HELP}
+            out["help"] = mod.SETTING_HELP
+            out["bool_keys"] = sorted(mod.BOOL_KEYS)
+            out["questions"] = s["questions"]
+            out["panel_channel_id"] = s.get("panel_channel_id")
+            out["panel_link"] = (f"https://discord.com/channels/{self.bot.get_channel(int(s['panel_channel_id'])).guild.id}/{s['panel_channel_id']}/{s['panel_message_id']}"
+                                 if s.get("panel_message_id") and s.get("panel_channel_id") and self.bot.get_channel(int(s["panel_channel_id"])) else None)
+        return web.json_response(out)
+
+    async def suggestions_settings_put(self, request):
+        await self.need(request, "suggestions")
+        cog, mod = self._suggestions()
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ApiError("Send the settings to change.")
+        await self._sg_call(cog.update_settings(body), mod)
+        return web.json_response({"ok": True})
+
+    async def suggestions_setup_post(self, request):
+        await self.need(request, "suggestions")
+        cog, mod = self._suggestions()
+        body = await request.json()
+        channel = self._text_channel(body.get("channel_id"))
+        await self._sg_call(cog.setup_channel(channel), mod)
+        return web.json_response({"ok": True})
+
+    async def suggestions_panel_post(self, request):
+        await self.need(request, "suggestions")
+        cog, mod = self._suggestions()
+        body = await request.json()
+        if cog.channel() is None:
+            raise ApiError("Pick the suggestions channel first.")
+        channel = self._text_channel(body.get("channel_id") or cog.settings.get("panel_channel_id") or cog.settings["channel_id"])
+        await self._sg_call(cog.post_panel(channel), mod)
+        return web.json_response({"ok": True})
+
+    async def suggestions_status_post(self, request):
+        await self.need(request, "suggestion_review")
+        cog, mod = self._suggestions()
+        body = await request.json()
+        doc = await self._sg_call(cog.set_status(request.match_info["number"], str(body.get("status", "")), body.get("reason")), mod)
+        return web.json_response({"ok": True, "item": self._sg_out(cog, doc)})
+
+    async def suggestions_delete(self, request):
+        await self.need(request, "suggestion_review")
+        cog, mod = self._suggestions()
+        await self._sg_call(cog.delete(request.match_info["number"]), mod)
         return web.json_response({"ok": True})
