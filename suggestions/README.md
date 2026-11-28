@@ -7,6 +7,18 @@
 
 Members press **Make a suggestion** under the button message. A short form pops up, and the bot posts their suggestion with 👍/👎 votes and a discussion thread. Staff respond and the member gets a DM. You can also manage everything on the web dashboard, under **Suggestions**.
 
+## Forum channels
+
+Run `?suggestions setup` with a **forum** channel instead of a text channel:
+
+- Each suggestion becomes its own post, named `#12 <suggestion>` and tagged **Suggestion**.
+- The button is a pinned post at the top of the forum.
+- Responding adds the matching tag (**Under review**, **Approved**, **Denied** or **Done**) next to Suggestion. Changing the response swaps that tag, and tags staff added by hand stay.
+- Missing tags are created for you, which needs the bot to have **Manage Channels**. If you already have a tag with the same name, in any capitalisation, the bot uses that one.
+- Rename the tags with `?suggestions set tag_approved Accepted` (also `tag_open`, `tag_considering`, `tag_denied`, `tag_done`). Leave one empty to skip it.
+- Finished posts are locked so nobody can reply. Turn that off with `?suggestions set lock_finished off`.
+- In a forum, the bot needs Create Posts, Embed Links, Read Message History, Add Reactions and **Manage Threads** (to pin and lock).
+
 ## Responding (Moderator)
 
 | Command | What it does |

@@ -3,11 +3,15 @@ Suggestions for Modmail.
 
 Members press a "Make a suggestion" button, fill in a short form, and the bot
 posts their suggestion for everyone to vote on (with a discussion thread).
+
+Works with a text channel or a forum channel. In a forum, each suggestion is
+its own post tagged "Suggestion", staff responses add a status tag
+("Approved", "Denied", ...), and the button lives in a pinned post.
 Staff mark suggestions as under review, approved, denied or done, and the
 member gets a DM about it.
 
 Setup (Administrator):
-    ?suggestions setup #channel          where suggestions go; posts the button there
+    ?suggestions setup #channel          where suggestions go (text or forum channel); posts the button there
     ?suggestions panel [#channel]        post the button again (or in another channel)
     ?suggestions show                    all settings and the form's questions
     ?suggestions set <setting> <value>   change wording or options
@@ -33,7 +37,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import discord
 from discord.ext import commands
@@ -78,6 +82,13 @@ DEFAULTS = {
     "dm_updates": True,
     "anonymous": False,
     "sticky_panel": True,
+    "lock_finished": True,
+    "tag_open": "Suggestion",
+    "tag_considering": "Under review",
+    "tag_approved": "Approved",
+    "tag_denied": "Denied",
+    "tag_done": "Done",
+    "panel_is_post": False,
     "cooldown": 300,  # seconds between suggestions per member
     "questions": DEFAULT_QUESTIONS,
     "next_number": 1,
@@ -94,14 +105,25 @@ SETTING_HELP = {
     "votes": "Add vote reactions to each suggestion (on/off).",
     "vote_up": "Emoji for voting yes.",
     "vote_down": "Emoji for voting no.",
-    "threads": "Start a discussion thread on each suggestion (on/off).",
+    "threads": "Start a discussion thread on each suggestion (on/off). Forum posts are always their own thread.",
+    "lock_finished": "Lock the discussion when a suggestion is approved, denied or done (on/off).",
+    "tag_open": "Forum tag every suggestion gets (forum channels only; empty for none).",
+    "tag_considering": "Forum tag added when under review.",
+    "tag_approved": "Forum tag added when approved.",
+    "tag_denied": "Forum tag added when denied.",
+    "tag_done": "Forum tag added when done.",
     "dm_updates": "DM the member when staff change their suggestion (on/off).",
     "anonymous": "Hide who made each suggestion (on/off).",
     "sticky_panel": "Keep the button message at the bottom of the suggestions channel (on/off).",
     "cooldown": "Minutes a member must wait between suggestions (0 for none).",
 }
-BOOL_KEYS = {"votes", "threads", "dm_updates", "anonymous", "sticky_panel"}
-LIMITS = {"panel_title": 256, "panel_text": 2000, "button_label": 80, "form_title": 45, "thanks": 500, "dm_text": 1000, "vote_up": 64, "vote_down": 64}
+BOOL_KEYS = {"votes", "threads", "dm_updates", "anonymous", "sticky_panel", "lock_finished"}
+TAG_KEYS = ("tag_open", "tag_considering", "tag_approved", "tag_denied", "tag_done")
+LIMITS = {"panel_title": 100, "panel_text": 2000, "button_label": 80, "form_title": 45, "thanks": 500, "dm_text": 1000, "vote_up": 64, "vote_down": 64,
+          **{k: 20 for k in TAG_KEYS}}
+OPTIONAL_TEXT = {"vote_up", "vote_down", *TAG_KEYS}
+PERM_NAMES = {"send_messages": "Send Messages", "manage_threads": "Manage Threads", "create_public_threads": "Create Public Threads",
+              "add_reactions": "Add Reactions", "read_message_history": "Read Message History", "embed_links": "Embed Links", "view_channel": "View Channel"}
 MAX_QUESTIONS = 5
 
 
@@ -181,9 +203,46 @@ class Suggestions(commands.Cog):
         channel = self.channel()
         return channel.guild if channel else self.bot.guild
 
-    def channel(self) -> Optional[discord.TextChannel]:
+    def channel(self):
+        """The suggestions channel: a text channel or a forum."""
         cid = self.settings.get("channel_id")
         return self.bot.get_channel(int(cid)) if cid else None
+
+    @staticmethod
+    def is_forum(channel) -> bool:
+        return isinstance(channel, discord.ForumChannel)
+
+    async def thread(self, thread_id) -> Optional[discord.Thread]:
+        """A thread or forum post, even if it's archived (not cached)."""
+        if not thread_id:
+            return None
+        thread = self.bot.get_channel(int(thread_id))
+        if thread is None:
+            try:
+                thread = await self.bot.fetch_channel(int(thread_id))
+            except discord.HTTPException:
+                return None
+        return thread if isinstance(thread, discord.Thread) else None
+
+    async def ensure_tags(self, forum: discord.ForumChannel) -> Dict[str, Optional[discord.ForumTag]]:
+        """Find the forum's status tags by name, creating any that are missing."""
+        out = {}
+        for key in TAG_KEYS:
+            name = (self.settings.get(key) or "").strip()
+            status = key[4:]
+            if not name:
+                out[status] = None
+                continue
+            tag = next((t for t in forum.available_tags if t.name.strip().lower() == name.lower()), None)
+            if tag is None:
+                if len(forum.available_tags) >= 20:
+                    raise SuggestionError(f"#{forum.name} already has 20 tags (Discord's limit), so the bot can't add \"{name}\". Remove one or rename a setting to match an existing tag.")
+                try:
+                    tag = await forum.create_tag(name=name, reason="Suggestions plugin")
+                except discord.Forbidden:
+                    raise SuggestionError(f"#{forum.name} has no \"{name}\" tag. Create it in the forum's settings, or give the bot Manage Channels so it can.")
+            out[status] = tag
+        return out
 
     def fill(self, text: str, **values) -> str:
         values.setdefault("server", self.guild.name if self.guild else "the server")
@@ -191,17 +250,24 @@ class Suggestions(commands.Cog):
             text = text.replace("{" + k + "}", str(v))
         return text
 
-    def check_channel(self, channel: discord.TextChannel, *, panel=False):
+    def check_channel(self, channel, *, panel=False):
+        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+            raise SuggestionError("Pick a text channel or a forum channel.")
+        forum = self.is_forum(channel)
         perms = channel.permissions_for(channel.guild.me)
         need = ["view_channel", "send_messages", "embed_links"]
+        if forum:
+            need += ["read_message_history"]
+            if panel or self.settings["lock_finished"]:
+                need += ["manage_threads"]  # pin the button post / lock finished posts
         if not panel:
             if self.settings["votes"]:
                 need += ["add_reactions", "read_message_history"]
-            if self.settings["threads"]:
+            if self.settings["threads"] and not forum:
                 need += ["create_public_threads"]
-        missing = [n for n in need if not getattr(perms, n, False)]
+        missing = list(dict.fromkeys(n for n in need if not getattr(perms, n, False)))
         if missing:
-            names = ", ".join(n.replace("_", " ").title() for n in missing)
+            names = ", ".join("Create Posts" if forum and n == "send_messages" else PERM_NAMES.get(n, n) for n in missing)
             raise SuggestionError(f"The bot needs {names} in #{channel.name}.")
 
     def embed_for(self, doc: dict) -> discord.Embed:
@@ -235,8 +301,10 @@ class Suggestions(commands.Cog):
         return view
 
     def link(self, doc: dict) -> str:
-        guild = self.bot.get_channel(int(doc["channel_id"]))
-        gid = guild.guild.id if guild else "@me"
+        channel = self.bot.get_channel(int(doc["channel_id"]))
+        gid = channel.guild.id if channel else "@me"
+        if doc.get("forum"):
+            return f"https://discord.com/channels/{gid}/{doc['thread_id']}"
         return f"https://discord.com/channels/{gid}/{doc['channel_id']}/{doc['message_id']}"
 
     async def get(self, number) -> dict:
@@ -260,12 +328,26 @@ class Suggestions(commands.Cog):
     # ------------------------------------------------------------------ #
     # Actions (used by commands, the button and the dashboard)
     # ------------------------------------------------------------------ #
-    async def post_panel(self, channel: discord.TextChannel) -> discord.Message:
+    async def post_panel(self, channel) -> discord.Message:
+        """Post the button. In a forum it's a pinned post at the top."""
         self.check_channel(channel, panel=True)
         await self.remove_panel()
-        message = await channel.send(embed=self.panel_embed(), view=self.panel_view())
-        self.settings["panel_channel_id"] = str(channel.id)
-        self.settings["panel_message_id"] = str(message.id)
+        if self.is_forum(channel):
+            tags = []
+            if channel.flags.require_tag:
+                open_tag = (await self.ensure_tags(channel)).get("open")
+                tags = [open_tag] if open_tag else channel.available_tags[:1]
+            post = await channel.create_thread(name=self.settings["panel_title"][:100] or "Make a suggestion",
+                                               embed=self.panel_embed(), view=self.panel_view(), applied_tags=tags)
+            try:
+                await post.thread.edit(pinned=True)
+            except discord.HTTPException as e:
+                logger.warning("Couldn't pin the suggestions post: %s", e)
+            self.settings.update(panel_channel_id=str(post.thread.id), panel_message_id=str(post.message.id), panel_is_post=True)
+            message = post.message
+        else:
+            message = await channel.send(embed=self.panel_embed(), view=self.panel_view())
+            self.settings.update(panel_channel_id=str(channel.id), panel_message_id=str(message.id), panel_is_post=False)
         await self.save_settings()
         return message
 
@@ -273,27 +355,38 @@ class Suggestions(commands.Cog):
         cid, mid = self.settings.get("panel_channel_id"), self.settings.get("panel_message_id")
         if not (cid and mid):
             return
-        channel = self.bot.get_channel(int(cid))
-        if channel is not None:
-            try:
-                await channel.get_partial_message(int(mid)).delete()
-            except discord.HTTPException:
-                pass
+        try:
+            if self.settings.get("panel_is_post"):
+                post = await self.thread(cid)
+                if post is not None:
+                    await post.delete()
+            else:
+                channel = self.bot.get_channel(int(cid))
+                if channel is not None:
+                    await channel.get_partial_message(int(mid)).delete()
+        except discord.HTTPException:
+            pass
         self.settings["panel_message_id"] = None
 
     async def refresh_panel(self):
         """Show new wording on the existing button message."""
         cid, mid = self.settings.get("panel_channel_id"), self.settings.get("panel_message_id")
-        channel = self.bot.get_channel(int(cid)) if cid else None
-        if channel is None or not mid:
+        if not (cid and mid):
+            return
+        channel = await self.thread(cid) if self.settings.get("panel_is_post") else self.bot.get_channel(int(cid))
+        if channel is None:
             return
         try:
             await channel.get_partial_message(int(mid)).edit(embed=self.panel_embed(), view=self.panel_view())
+            if self.settings.get("panel_is_post") and channel.name != self.settings["panel_title"][:100]:
+                await channel.edit(name=self.settings["panel_title"][:100])
         except discord.HTTPException as e:
             logger.warning("Couldn't update the suggestions button message: %s", e)
 
-    async def setup_channel(self, channel: discord.TextChannel) -> discord.Message:
+    async def setup_channel(self, channel) -> discord.Message:
         self.check_channel(channel)
+        if self.is_forum(channel):
+            await self.ensure_tags(channel)  # make sure the tags exist before anyone suggests
         self.settings["channel_id"] = str(channel.id)
         await self.save_settings()
         return await self.post_panel(channel)
@@ -327,7 +420,15 @@ class Suggestions(commands.Cog):
             "answers": answers, "status": "open", "reason": None, "channel_id": str(channel.id),
             "message_id": None, "thread_id": None, "created": datetime.now(timezone.utc).isoformat(),
         }
-        message = await channel.send(embed=self.embed_for(doc))
+        if self.is_forum(channel):
+            # Each suggestion is its own forum post, tagged "Suggestion".
+            tags = await self.ensure_tags(channel)
+            post = await channel.create_thread(name=f"#{number} {answers[0]['value']}"[:100], embed=self.embed_for(doc),
+                                               applied_tags=[tags["open"]] if tags.get("open") else [], auto_archive_duration=10080)
+            message = post.message
+            doc.update(forum=True, thread_id=str(post.thread.id), applied_tag_ids=[str(tags["open"].id)] if tags.get("open") else [])
+        else:
+            message = await channel.send(embed=self.embed_for(doc))
         doc["message_id"] = str(message.id)
         self.last_used[member.id] = time.monotonic()
         if self.settings["votes"]:
@@ -337,7 +438,7 @@ class Suggestions(commands.Cog):
                         await message.add_reaction(e)
                     except discord.HTTPException as err:
                         logger.warning("Couldn't add vote reaction %s: %s", e, err)
-        if self.settings["threads"]:
+        if self.settings["threads"] and not doc.get("forum"):
             try:
                 thread = await message.create_thread(name=f"#{number} {answers[0]['value']}"[:100], auto_archive_duration=10080)
                 doc["thread_id"] = str(thread.id)
@@ -360,22 +461,49 @@ class Suggestions(commands.Cog):
         doc["reason"] = (reason or "").strip()[:900] or None
         doc["updated"] = datetime.now(timezone.utc).isoformat()
         await self.db.replace_one({"_id": doc["_id"]}, doc, upsert=True)
-        channel = self.bot.get_channel(int(doc["channel_id"]))
-        if channel is not None and doc.get("message_id"):
-            try:
-                await channel.get_partial_message(int(doc["message_id"])).edit(embed=self.embed_for(doc))
-            except discord.HTTPException as e:
-                logger.warning("Couldn't update suggestion #%s: %s", doc["number"], e)
-        if doc.get("thread_id"):
-            thread = self.bot.get_channel(int(doc["thread_id"]))
-            if isinstance(thread, discord.Thread):
+        lock = self.settings["lock_finished"] and status in FINAL
+        if doc.get("forum"):
+            await self._update_post(doc, status, lock)
+        else:
+            channel = self.bot.get_channel(int(doc["channel_id"]))
+            if channel is not None and doc.get("message_id"):
                 try:
-                    await thread.edit(archived=status in FINAL, locked=status in FINAL)
+                    await channel.get_partial_message(int(doc["message_id"])).edit(embed=self.embed_for(doc))
+                except discord.HTTPException as e:
+                    logger.warning("Couldn't update suggestion #%s: %s", doc["number"], e)
+            thread = await self.thread(doc.get("thread_id"))
+            if thread is not None:
+                try:
+                    await thread.edit(archived=lock, locked=lock)
                 except discord.HTTPException:
                     pass
         if self.settings["dm_updates"]:
             await self._dm_author(doc)
         return doc
+
+    async def _update_post(self, doc: dict, status: str, lock: bool):
+        """Forum post: new embed, keep the Suggestion tag, swap the status tag, lock when finished."""
+        post = await self.thread(doc["thread_id"])
+        if post is None:
+            logger.warning("Suggestion #%s's forum post is gone.", doc["number"])
+            return
+        try:
+            if post.archived or post.locked:
+                await post.edit(archived=False, locked=False)
+            await post.get_partial_message(int(doc["message_id"])).edit(embed=self.embed_for(doc))
+            tags = await self.ensure_tags(post.parent)
+            # Our tags (including the status tag we applied last time, even if it's been renamed since) get
+            # replaced; tags staff added by hand stay.
+            ours = {t.id for t in tags.values() if t} | {int(i) for i in doc.get("applied_tag_ids", [])}
+            keep = [t for t in post.applied_tags if t.id not in ours]
+            wanted = [t for t in (tags.get("open"), tags.get(status) if status != "open" else None) if t]
+            await post.edit(applied_tags=(wanted + keep)[:5], locked=lock)
+            doc["applied_tag_ids"] = [str(t.id) for t in wanted]
+            await self.db.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+        except SuggestionError as e:
+            logger.warning("Suggestion #%s: %s", doc["number"], e)
+        except discord.HTTPException as e:
+            logger.warning("Couldn't update suggestion #%s's post: %s", doc["number"], e)
 
     async def _dm_author(self, doc: dict):
         user = self.bot.get_user(int(doc["author_id"]))
@@ -401,19 +529,19 @@ class Suggestions(commands.Cog):
     async def delete(self, number):
         doc = await self.get(number)
         await self.db.delete_one({"_id": doc["_id"]})
-        channel = self.bot.get_channel(int(doc["channel_id"]))
-        if channel is not None and doc.get("message_id"):
-            try:
-                await channel.get_partial_message(int(doc["message_id"])).delete()
-            except discord.HTTPException:
-                pass
-        if doc.get("thread_id"):
-            thread = self.bot.get_channel(int(doc["thread_id"]))
-            if thread is not None:
+        if not doc.get("forum"):
+            channel = self.bot.get_channel(int(doc["channel_id"]))
+            if channel is not None and doc.get("message_id"):
                 try:
-                    await thread.delete()
+                    await channel.get_partial_message(int(doc["message_id"])).delete()
                 except discord.HTTPException:
                     pass
+        thread = await self.thread(doc.get("thread_id"))
+        if thread is not None:
+            try:
+                await thread.delete()
+            except discord.HTTPException:
+                pass
         return doc
 
     async def update_settings(self, changes: dict):
@@ -436,7 +564,7 @@ class Suggestions(commands.Cog):
                 new["cooldown"] = int(minutes * 60)
             elif key in LIMITS:
                 text = str(value or "").strip()
-                if not text and key not in ("vote_up", "vote_down"):
+                if not text and key not in OPTIONAL_TEXT:
                     raise SuggestionError(f"{key.replace('_', ' ').capitalize()} can't be empty.")
                 if len(text) > LIMITS[key]:
                     raise SuggestionError(f"{key.replace('_', ' ').capitalize()} can be up to {LIMITS[key]} characters.")
@@ -447,6 +575,9 @@ class Suggestions(commands.Cog):
         await self.save_settings()
         if changes.keys() & {"panel_title", "panel_text", "button_label"}:
             await self.refresh_panel()
+        channel = self.channel()
+        if self.is_forum(channel) and changes.keys() & set(TAG_KEYS):
+            await self.ensure_tags(channel)
 
     @staticmethod
     def clean_questions(questions) -> List[dict]:
@@ -530,9 +661,13 @@ class Suggestions(commands.Cog):
 
     @suggestions.command(name="setup")
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def suggestions_setup(self, ctx, channel: discord.TextChannel):
+    async def suggestions_setup(self, ctx, channel: Union[discord.TextChannel, discord.ForumChannel]):
         """
         Choose where suggestions go, and post the button there.
+
+        Works with a text channel or a forum channel. In a forum, each suggestion is
+        its own post tagged "Suggestion", responses add an "Approved"/"Denied"/... tag,
+        and the button is a pinned post. Missing tags are created for you.
 
         **Example:**
         `{prefix}suggestions setup #suggestions`
@@ -542,13 +677,15 @@ class Suggestions(commands.Cog):
         except SuggestionError as e:
             return await self._err(ctx, str(e))
         p = self.bot.prefix
-        await self._ok(ctx, f"Suggestions now go to {channel.mention}, and the button is posted there.\n\n"
+        where = ("Each suggestion will be its own post there, tagged **" + (self.settings["tag_open"] or "nothing") + "**, and the button is a pinned post at the top."
+                 if self.is_forum(channel) else "The button is posted there.")
+        await self._ok(ctx, f"Suggestions now go to {channel.mention}. {where}\n\n"
                             f"Change the wording with `{p}suggestions set`, or the form's questions with `{p}suggestions question`. "
                             f"See everything with `{p}suggestions show`.", "Suggestions are set up")
 
     @suggestions.command(name="panel")
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def suggestions_panel(self, ctx, channel: discord.TextChannel = None):
+    async def suggestions_panel(self, ctx, channel: Union[discord.TextChannel, discord.ForumChannel] = None):
         """Post the button message again, here or in another channel (the old one is removed)."""
         channel = channel or self.channel() or ctx.channel
         try:
@@ -573,7 +710,7 @@ class Suggestions(commands.Cog):
                 value = "on" if value else "off"
             elif key == "cooldown":
                 value = f"{round(value / 60, 1):g} minutes"
-            embed.add_field(name=key, value=f"{str(value)[:200]}", inline=key in BOOL_KEYS or key in ("cooldown", "vote_up", "vote_down"))
+            embed.add_field(name=key, value=f"{str(value)[:200]}" or "(none)", inline=key in BOOL_KEYS or key in ("cooldown", "vote_up", "vote_down"))
         qs = "\n".join(f"{i}. {q['label']} ({q['style']}{', optional' if not q['required'] else ''})" for i, q in enumerate(s["questions"], 1))
         embed.add_field(name="Form questions", value=qs, inline=False)
         embed.set_footer(text=f"Change one with {self.bot.prefix}suggestions set <setting> <value>")

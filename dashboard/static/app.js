@@ -996,7 +996,7 @@ VIEWS.suggestions = async (el) => {
   let settingsPart = null;
   if (d.can_settings) {
     const s = d.settings;
-    const chan = channelSelect(main.channels, d.channel_id || "", "Pick a channel");
+    const chan = channelSelect([...(main.forums || []).map((f) => ({ ...f, name: `${f.name} (forum)` })), ...main.channels], d.channel_id || "", "Pick a channel or forum");
     const moveBtn = h("button", { class: "btn primary", text: d.channel_id ? "Use this channel" : "Set up suggestions" });
     moveBtn.onclick = () => busy(moveBtn, async () => {
       if (!chan.value) throw new Error("Pick a channel.");
@@ -1046,7 +1046,9 @@ VIEWS.suggestions = async (el) => {
       h("h2", { class: "mt", text: "Settings" }),
       h("div", { class: "panel" },
         h("div", { class: "row" }, h("h3", { class: "grow", text: "Channel" }), h("label", { class: "inline" }, enabled, h("span", { text: "Open" }))),
-        h("p", { class: "muted small", text: "Suggestions are posted here, and the button goes at the bottom of it." }),
+        h("p", { class: "muted small", text: d.is_forum
+          ? "Each suggestion is its own post in this forum, and the button is a pinned post at the top."
+          : "Suggestions are posted here, and the button goes at the bottom. Pick a forum to make each suggestion its own tagged post." }),
         h("div", { class: "row" }, h("div", { class: "grow" }, chan), moveBtn),
         h("div", { class: "row mt" }, repost, d.panel_link ? h("a", { class: "btn quiet", href: d.panel_link, target: "_blank", rel: "noopener", text: "Open the button message" }) : null)),
       h("div", { class: "panel" }, h("h3", { text: "Wording" }),
@@ -1058,8 +1060,12 @@ VIEWS.suggestions = async (el) => {
         field("DM when staff respond", text("dm_text", true), "{number}, {server} and {status}, e.g. “was approved”. The reason is added below it."),
         h("h3", { class: "mt", text: "Options" }),
         h("div", { class: "sg-opts" }, toggle("votes", "Vote reactions"), toggle("threads", "Discussion thread"), toggle("dm_updates", "DM members updates"),
-          toggle("anonymous", "Hide who suggested"), toggle("sticky_panel", "Keep the button at the bottom")),
+          toggle("anonymous", "Hide who suggested"), toggle("sticky_panel", "Keep the button at the bottom"), toggle("lock_finished", "Lock finished discussions")),
         h("div", { class: "sg-grid" }, field("Vote yes", text("vote_up")), field("Vote no", text("vote_down")), field("Cooldown (minutes)", text("cooldown"))),
+        h("h3", { class: "mt", text: "Forum tags" }),
+        h("p", { class: "muted small", text: "Only used when suggestions go to a forum. Every post gets the first tag; responding adds the matching status tag. Missing tags are created in the forum for you. Leave one empty to skip it." }),
+        h("div", { class: "sg-grid" }, field("Every suggestion", text("tag_open")), field("Under review", text("tag_considering")), field("Approved", text("tag_approved")),
+          field("Denied", text("tag_denied")), field("Done", text("tag_done"))),
         saveSettings),
       h("div", { class: "panel" }, h("h3", { text: "Form questions" }),
         h("p", { class: "muted small", text: "What members fill in. The first answer becomes the suggestion's title. Discord allows up to 5 questions of 45 characters each." }),

@@ -435,6 +435,7 @@ class DashboardAPI:
                     for c in g.text_channels
                 ],
                 "categories": [{"id": str(c.id), "name": c.name} for c in g.categories],
+                "forums": [{"id": str(c.id), "name": c.name, "category": c.category.name if c.category else None} for c in getattr(g, "forums", [])],
                 "emojis": [{"id": str(e.id), "name": e.name, "text": str(e), "url": str(e.url)} for e in getattr(g, "emojis", [])],
             }
         return web.json_response(out)
@@ -1257,6 +1258,12 @@ class DashboardAPI:
         except discord.HTTPException as e:
             raise ApiError(f"Discord refused: {e.text or e}")
 
+    def _sg_channel(self, raw):
+        channel = self.bot.get_channel(int(raw)) if str(raw or "").isdigit() else None
+        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+            raise ApiError("Pick a text channel or a forum channel.")
+        return channel
+
     def _sg_out(self, cog, doc):
         return {**self._serial(doc), "link": cog.link(doc) if doc.get("message_id") else None,
                 "title": (doc.get("answers") or [{}])[0].get("value", "")}
@@ -1275,12 +1282,14 @@ class DashboardAPI:
             "can_settings": can_settings,
             "enabled": cog.settings["enabled"],
             "channel_id": cog.settings.get("channel_id"),
+            "is_forum": cog.is_forum(cog.channel()),
         }
         if can_settings:
             s = cog.settings
             out["settings"] = {k: (round(s[k] / 60, 1) if k == "cooldown" else s[k]) for k in mod.SETTING_HELP}
             out["help"] = mod.SETTING_HELP
             out["bool_keys"] = sorted(mod.BOOL_KEYS)
+            out["tag_keys"] = list(mod.TAG_KEYS)
             out["questions"] = s["questions"]
             out["panel_channel_id"] = s.get("panel_channel_id")
             out["panel_link"] = (f"https://discord.com/channels/{self.bot.get_channel(int(s['panel_channel_id'])).guild.id}/{s['panel_channel_id']}/{s['panel_message_id']}"
@@ -1300,7 +1309,7 @@ class DashboardAPI:
         await self.need(request, "suggestions")
         cog, mod = self._suggestions()
         body = await request.json()
-        channel = self._text_channel(body.get("channel_id"))
+        channel = self._sg_channel(body.get("channel_id"))
         await self._sg_call(cog.setup_channel(channel), mod)
         return web.json_response({"ok": True})
 
@@ -1310,7 +1319,8 @@ class DashboardAPI:
         body = await request.json()
         if cog.channel() is None:
             raise ApiError("Pick the suggestions channel first.")
-        channel = self._text_channel(body.get("channel_id") or cog.settings.get("panel_channel_id") or cog.settings["channel_id"])
+        wanted = body.get("channel_id") or (cog.settings["channel_id"] if cog.settings.get("panel_is_post") else cog.settings.get("panel_channel_id")) or cog.settings["channel_id"]
+        channel = self._sg_channel(wanted)
         await self._sg_call(cog.post_panel(channel), mod)
         return web.json_response({"ok": True})
 
